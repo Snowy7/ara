@@ -13,6 +13,7 @@ use bevy_ecs::{
 };
 use bevy_reflect::Reflect;
 use bevy_replicon::prelude::{AppVisibilityExt, ScopeLifetime, SingleComponent, VisibilityFilter};
+use bevy_time::{Real, Time, TimeUpdateStrategy, Virtual};
 use lightyear::{prelude::input::native::*, prelude::*};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -25,7 +26,8 @@ mod server;
 pub use client::{Client, ClientConfig, ClientStatus};
 pub use server::{AdapterRef, Authoritative, Server, ServerConfig};
 
-const PROTOCOL: u64 = 0xa4a0_0002_0001;
+// Spawn baselines include scene/streaming lifetime ownership.
+const PROTOCOL: u64 = 0xa4a0_0002_0002;
 
 /// Encrypted short-lived join credential; never log or persist it with replay artifacts.
 pub struct JoinToken(pub(crate) Vec<u8>);
@@ -50,7 +52,10 @@ impl MapEntities for Input {
     fn map_entities<M: EntityMapper>(&mut self, _: &mut M) {}
 }
 impl Input {
-    fn typed<F: SimulationFeature>(&self) -> Result<F::Input> {
+    fn typed_with<F: SimulationFeature>(
+        &self,
+        codec: Option<&crate::ActionCodec<F::Input>>,
+    ) -> Result<F::Input> {
         if self.data.len() > 256 {
             return Err(NetError("feature input exceeds 256 bytes".into()));
         }
@@ -59,7 +64,14 @@ impl Input {
         } else {
             postcard::from_bytes(&self.data)?
         };
-        F::input(Some(F::action(&input)?))?;
+        match codec {
+            Some(codec) => {
+                (codec.expand)(&input)?;
+            }
+            None => {
+                F::input(Some(F::action(&input)?))?;
+            }
+        }
         Ok(input)
     }
 }
@@ -170,7 +182,7 @@ fn base<F: SimulationFeature>(server: bool, policies: PolicyRegistry, hz: u32) -
     app.insert_resource(Compatibility(
         ara_sim::StateHash::of_bytes(
             format!(
-                "{}:{}:{}:{hz}",
+                "{PROTOCOL}:{}:{}:{}:{hz}",
                 F::State::describe().name,
                 F::ACTION,
                 F::VERSION
@@ -184,6 +196,19 @@ fn base<F: SimulationFeature>(server: bool, policies: PolicyRegistry, hz: u32) -
 fn finish(app: &mut App) {
     app.finish();
     app.cleanup();
+}
+fn advance(app: &mut App, elapsed: Duration) {
+    // The first Bevy update initializes its epoch without consuming a duration.
+    // Prime it so every explicit advance accounts for exactly the supplied time.
+    let mut time = app.world_mut().resource_mut::<Time<Real>>();
+    if time.last_update().is_none() {
+        time.update_with_duration(Duration::ZERO);
+    }
+    app.world_mut()
+        .resource_mut::<Time<Virtual>>()
+        .set_max_delta(Duration::MAX);
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(elapsed));
+    app.update();
 }
 fn send(world: &mut World, link: Entity, message: ToClient) {
     if let Some(mut sender) = world.get_mut::<MessageSender<ToClient>>(link) {

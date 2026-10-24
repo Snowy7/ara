@@ -1,5 +1,5 @@
 //! Popup/menu/tooltip/modal composition over the same retained tree and input scopes.
-use crate::{Result, Ui, input::InputState, source::stable_id};
+use crate::{Result, Ui, input::InputState};
 /// Overlay routing policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LayerKind {
@@ -55,11 +55,11 @@ impl LayerStack {
         initial: Option<u64>,
     ) -> Result<()> {
         if self.layers.iter().any(|l| l.node == node) || position.iter().any(|v| !v.is_finite()) {
-            return Err("ARA7046: layer already open or invalid position".into());
+            return Err("ARA4046: layer already open or invalid position".into());
         }
-        let i = ui.by_id(node).ok_or("ARA7046: layer node missing")?;
+        let i = ui.by_id(node).ok_or("ARA4046: layer node missing")?;
         if ui.nodes[i].element.parent != Some(0) {
-            return Err("ARA7046: overlays must be mounted under the UI root".into());
+            return Err("ARA4046: overlays must be mounted under the UI root".into());
         }
         ui.set_visible(i, true)?;
         let mut style = ui.tree.style(ui.nodes[i].layout_id)?.clone();
@@ -103,11 +103,15 @@ impl LayerStack {
 }
 impl Ui {
     /// Runtime visibility mutation; authoring changes still go through source commands.
+    /// The current visibility again is a no-op.
     pub fn set_visible(&mut self, index: usize, visible: bool) -> Result<()> {
         let n = self
             .nodes
             .get_mut(index)
-            .ok_or("ARA7046: invalid node handle")?;
+            .ok_or("ARA4046: invalid node handle")?;
+        if n.visible == visible {
+            return Ok(());
+        }
         n.visible = visible;
         let mut style = self.tree.style(n.layout_id)?.clone();
         style.display = if visible {
@@ -123,7 +127,7 @@ impl Ui {
     /// Resize/DPI logical viewport update; text is rebroken only when its available width changes.
     pub fn resize(&mut self, size: [f32; 2]) -> Result<()> {
         if size.iter().any(|v| !v.is_finite() || *v <= 0.0) {
-            return Err("ARA7040: invalid viewport".into());
+            return Err("ARA4040: invalid viewport".into());
         }
         if size != self.size {
             self.size = size;
@@ -134,9 +138,6 @@ impl Ui {
     }
     /// Authored ID for host action routing from a stable identity.
     pub fn authored_id(&self, id: u64) -> Option<&str> {
-        self.nodes
-            .iter()
-            .find(|n| stable_id(&n.element.id) == id)
-            .map(|n| n.element.id.as_str())
+        self.by_id(id).map(|i| self.nodes[i].element.id.as_str())
     }
 }

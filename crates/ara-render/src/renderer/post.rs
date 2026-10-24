@@ -7,6 +7,20 @@ use ara_gpu::{
 };
 use bytemuck::Zeroable;
 
+/// Display curve applied after exposure by the baseline tone map pass. The values
+/// match `ara_render_fidelity::ToneMapper` so both renderers share one look.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum ToneCurve {
+    /// Narkowicz's per-channel ACES fit (the M1 curve).
+    #[default]
+    AcesFit = 0,
+    /// Khronos PBR Neutral.
+    Neutral = 1,
+    /// Hill's fitted ACES RRT+ODT, pre-scaled to keep 18% grey.
+    Filmic = 2,
+}
+
 /// Shared offline-cooked baseline post pass; it owns no scene or gameplay state.
 pub struct ToneMap {
     pipeline: Pipeline,
@@ -16,7 +30,10 @@ pub struct ToneMap {
 impl ToneMap {
     /// Loads the main renderer's cooked tonemap; never compiles at runtime.
     pub fn new(gpu: &mut VulkanDevice) -> Result<Self> {
-        let artifacts = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("cooked");
+        let artifacts = ara_gpu::cooked::resource_dir(
+            env!("CARGO_PKG_NAME"),
+            concat!(env!("CARGO_MANIFEST_DIR"), "/cooked"),
+        );
         let metadata = serde_json::from_slice(&std::fs::read(artifacts.join("tonemap.json"))?)?;
         let pipeline = gpu.create_pipeline(&metadata, &artifacts)?;
         let frame = gpu.create_buffer(

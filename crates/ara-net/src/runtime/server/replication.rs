@@ -54,6 +54,12 @@ fn refresh_inner<F: SimulationFeature>(
             let spawn = Spawn {
                 id,
                 identity: identity.clone(),
+                projected: state
+                    .session
+                    .session()
+                    .projection()
+                    .entity(&identity)
+                    .is_some(),
                 prefab: identity.clone(),
                 version: policies.hash(),
                 owner: None,
@@ -89,7 +95,7 @@ fn refresh_inner<F: SimulationFeature>(
             if name == &feature {
                 continue;
             }
-            if let Some(value) = state.session.session().component_at(source, name)? {
+            if let Some(value) = state.session.component_at(source, name)? {
                 public
                     .0
                     .extend(policies.project(name, &value, Audience::Relevant)?.0);

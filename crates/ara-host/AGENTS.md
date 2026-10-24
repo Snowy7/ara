@@ -102,6 +102,10 @@ service registers them.
 - `cmd.apply`'s catalog entry lists every command with its args in the `cmd`
   field's description (`list_commands`), so MCP clients see them without lookups.
 - `session.begin` also returns `documents` (path, kind, ID) and `mainScene`.
+- Native `.ui` XML projects to `UiSource`: `doc.create` seeds markup; `ui.source.apply`
+  validates lossless ops. Save/fmt use `Project::read_document`/`write_document`,
+  preserving XML/identity comments. Reconcile UI conflicts before native persistence.
+- `Cx::main_scene` reads unsaved transactional `project.setMain` settings for Play's default.
 - `inspect` entities and `query` terms accept names: `name:Crate`, a bare word
   (`query`: names containing it; `inspect`: one exact match).
 - Scene-to-text flags unresolved merge conflicts with the `ara resolve` hint.
@@ -112,39 +116,35 @@ service registers them.
   params type → service → **drain**. The drain journals each commit, tracks agent
   commits for review, schedules the flush and notifies subscribers. Command scopes
   are checked by the ara-cmd registry inside `cmd.apply`.
-- Review: agent transactions start `applied`; `review.revert` undoes a whole
+- Review: agent transactions start `accepted` under amended D24; `review.revert` undoes a whole
   transaction (store undo) or a subset of entities (a compensating transaction
-  based on the target's revision, so later edits conflict). Only human sessions
-  accept. A redo (undo of an undo) makes the original `applied` again.
-- Checkpoints: one per agent `cmd.apply` turn (at the revision before it), plus
-  manual ones; `session.rollback` undoes the session's later transactions all or
-  nothing.
+  based on the target's revision, so later edits conflict). Accept remains an
+  idempotent compatibility action for humans and agents. Redo restores `accepted`.
+- Checkpoints: one per agent `cmd.apply` turn at its prior revision, plus manual ones.
+  `session.rollback` undoes the session's later transactions all or nothing.
 - Journal: `txn`, `flush` (doc, rev, FNV hash), `session`, `ended`, `checkpoint`,
   `review`, `base` lines. On open, each file's revision is its newest flush entry
   with a matching hash; newer transactions are re-applied. Compaction (past 4096
-  entries, only when nothing is unsaved) keeps the newest 1024 transactions.
-- Flush writes changed documents canonically after `debounce` (temp + rename) and
-  always journals a `flush` entry, even when the text is unchanged.
-- Watcher (polling): changed file → read → three-way merge (base = last synced)
-  → human `external edit` transaction. Invalid files and conflicts mark the doc
+  entries, nothing unsaved or being written) keeps the newest 1024 transactions.
+- File I/O runs on the file thread (`file_io.rs`), never in `tick`: writes after
+  `debounce` (temp + rename; `flush` journaled when it lands, even if unchanged),
+  removals, `notify` events (30 s rescan; polling without them). `watch_every` zero
+  checks synchronously per tick (tests). An external edit three-way merges (base =
+  last synced) as a human `external edit`; invalid files and conflicts mark the doc
   diverged (no flushes) until `doc.sync {keep: memory|disk}` or a clean edit.
 
 ## Gotchas
-- Host IDs (sessions, checkpoints, jobs) and the store's IDs come from
-  `HostConfig::seed`; reopening with the same seed in tests re-mints the same IDs.
-- `*.types.json` changes are only reported (ARA1912); restart to load them.
-- No fsync per journal line: safe against process crashes, not power loss.
-- Sessions survive restarts (journaled); subscriptions don't.
+- Host/store IDs use `HostConfig::seed`; reopening with the same test seed re-mints them.
+- `*.types.json` changes are only reported (ARA1912); restart to load them. No fsync
+  per journal line (process crashes only). Sessions survive restarts; subscriptions don't.
 
 ## Testing
-`cargo test -p ara-host`. Unit tests: query parsing (bare words), logs, journal
-compaction, review roll-up. `tests/host.rs` (fixture copied to a temp dir): JSON-RPC
-round trips, scopes, dry run = apply, symbols, review per entity, rollback, crash
-replay, external edits/conflicts, service registration, subscriptions with a job's
-progress, document inference + apply text, required agent `why`. `tests/collab.rs`:
-claims vs agents, `who`, branches, restart, submits, per-participant undo.
-Snapshots: scene-to-text. `tests/diag.rs` (serialized: the bus is global): grouped
-logs and attribution, subscriptions with other threads' emits, report and clear,
-`why` over the protocol with its fix applied, persistence across a restart.
-`Cx::create_document` makes an empty canonical document for typed create actions;
-fill it with `Cx::apply` (normal attribution/review/undo).
+`cargo test -p ara-host`: query parsing, logs, journal compaction and review roll-up.
+`tests/host.rs` copies fixtures to scratch: protocol, scopes, dry runs, symbols, review,
+rollback/recovery, external edits/conflicts, the file thread, services/jobs/subscriptions,
+document inference, apply text and agent `why`. `tests/collab.rs`: advisory claims,
+presence, branches/restart/submits and participant undo. Scene-to-text snapshots.
+`tests/diag.rs` serializes the global bus: grouped/attributed logs, cross-thread
+subscriptions, report/clear, executable `why` fixes and restart persistence.
+`Cx::create_document` delegates to `doc.create`, including format templates;
+fill documents with `Cx::apply` for normal attribution/history/undo.

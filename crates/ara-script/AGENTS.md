@@ -7,6 +7,10 @@ Depends on ara-schema, ara-diag, ara-components, bevy_ecs 0.20, netcorehost, lib
 
 ## Public API
 
+- `engine_bindings()`: the canonical ordered engine columns exposed to C# (currently
+  `Transform`), shared by the runtime, export hash and checked-in binding generation.
+  A new schema does not expose Rust storage until it has an explicit checked binding.
+
 - `abi` (ABI v2): `HostInit` (+ `HostApi`, Rust → C#) and `ScriptApi` (C# → Rust), `Tick`,
   `Frame`, `SystemCall`, `BehaviourCall`, `CommandCall`, `ReloadReport` (kind, escalation,
   origin, cascade size, per-phase µs), the `ABI_CONSTS` (`RELOAD_*`, `ESC_*`, `ORIGIN_*`) and
@@ -16,6 +20,8 @@ Depends on ara-schema, ara-diag, ara-components, bevy_ecs 0.20, netcorehost, lib
 - `ScriptHost` (per process; one .NET runtime):
   - `start(ScriptConfig, SchemaDb, &EngineBindings, &mut World)`;
     `ScriptConfig::jit(ara_host_dir)` (+ `compile_server`) or `::native_aot(lib)`.
+  - `shipping::ScriptManifest`: portable NativeAOT library, ABI/layout identity and
+    linked modules; metadata mismatches report `ARA0921` before loading the image.
   - `load_modules(world, &[ModuleSpec])`: dependency order (`load_order`); cycles
     (`ARA0923`) and unknown references (`ARA0924`) are refused, the rest load.
   - Per tick: `tick_boundary(world) -> Boundary` (the only place reloads apply; `reports`)
@@ -28,6 +34,8 @@ Depends on ara-schema, ara-diag, ara-components, bevy_ecs 0.20, netcorehost, lib
     `modules` (heat), `set_heat`, `compiling()`, `diag(DIAG_*)`, `shutdown() -> leaked generations`.
 - `ModuleSpec { name, dir, assembly, watch, hot, references, profile }` from `ara.module.toml`
   (`references = ["Core"]`, `profile = "gameplay" | "editor"`: the API allowlist, ARA05xx).
+- `EngineBindings::builtin()` shares Ara.Runtime's native view list with codegen;
+  schema blittability alone does not establish a Rust component's native layout.
 - `EngineBindings` + `bind_component!`, `run` (`RunPool`/`RunWorker`), `value`, `codes`
   (`ARA0900`–`ARA0999`), `register_tick_thread()`.
 

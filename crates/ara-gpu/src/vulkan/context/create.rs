@@ -5,6 +5,14 @@ use ash::vk::TaggedStructure;
 impl Gpu {
     /// Enables synchronization validation explicitly; failure to find it is fatal.
     pub fn new(window_extensions: &[std::ffi::CString]) -> Result<Self> {
+        Self::with_ray_tracing(window_extensions, true)
+    }
+
+    pub(crate) fn with_ray_tracing(
+        window_extensions: &[std::ffi::CString],
+        enable_ray_tracing: bool,
+    ) -> Result<Self> {
+        crate::cpu_scope!("GPU.device_create");
         let mut validation = Box::<Validation>::default();
         // SAFETY: All create-info slices live through their calls; the entry,
         // instance, device and callback userdata are retained by Gpu.
@@ -121,6 +129,14 @@ impl Gpu {
             if hdr_metadata {
                 device_extensions.push(ash::ext::hdr_metadata::NAME.as_ptr());
             }
+            // Shared surfaces (D19 embedded Play): opaque NT-handle memory export and
+            // import. External memory itself is core 1.1; only the Win32 handle
+            // extension is enabled, and only where the driver offers it.
+            let external_memory =
+                cfg!(windows) && has_extension(ash::khr::external_memory_win32::NAME);
+            if external_memory {
+                device_extensions.push(ash::khr::external_memory_win32::NAME.as_ptr());
+            }
             for &extension in &device_extensions {
                 ensure!(
                     has_extension(CStr::from_ptr(extension)),
@@ -152,7 +168,8 @@ impl Gpu {
             if mesh_shading {
                 device_extensions.push(ash::ext::mesh_shader::NAME.as_ptr());
             }
-            let ray_tracing = rt_extensions
+            let ray_tracing = enable_ray_tracing
+                && rt_extensions
                 && acceleration_features.acceleration_structure != 0
                 && ray.ray_query != 0
                 && acceleration_features
@@ -171,6 +188,8 @@ impl Gpu {
                     && v12.timeline_semaphore != 0
                     && v12.buffer_device_address != 0
                     && v12.descriptor_indexing != 0
+                    && v12.runtime_descriptor_array != 0
+                    && v12.descriptor_binding_variable_descriptor_count != 0
                     && v12.shader_sampled_image_array_non_uniform_indexing != 0
                     && v12.shader_storage_buffer_array_non_uniform_indexing != 0
                     && v12.descriptor_binding_sampled_image_update_after_bind != 0
@@ -205,6 +224,8 @@ impl Gpu {
                 .timeline_semaphore(true)
                 .buffer_device_address(true)
                 .descriptor_indexing(true)
+                .runtime_descriptor_array(true)
+                .descriptor_binding_variable_descriptor_count(true)
                 .shader_sampled_image_array_non_uniform_indexing(true)
                 .shader_storage_buffer_array_non_uniform_indexing(true)
                 .descriptor_binding_sampled_image_update_after_bind(true)
@@ -226,6 +247,7 @@ impl Gpu {
                 // Enabling the reported core feature also permits that interface
                 // when the producer is a mesh stage rather than geometry stage.
                 .geometry_shader(core_supported.geometry_shader != 0)
+                .texture_compression_bc(core_supported.texture_compression_bc != 0)
                 .shader_int64(buffer_int64_atomics)
                 .fragment_stores_and_atomics(true)
                 .vertex_pipeline_stores_and_atomics(true)
@@ -272,11 +294,39 @@ impl Gpu {
             let memory = instance.get_physical_device_memory_properties(physical);
             let mut as_properties = vk::PhysicalDeviceAccelerationStructurePropertiesKHR::default();
             let mut mesh_properties = vk::PhysicalDeviceMeshShaderPropertiesEXT::default();
+            let mut indexing = vk::PhysicalDeviceDescriptorIndexingProperties::default();
+            let mut id_properties = vk::PhysicalDeviceIDProperties::default();
             instance.get_physical_device_properties2(
                 physical,
                 &mut vk::PhysicalDeviceProperties2::default()
                     .push(&mut as_properties)
-                    .push(&mut mesh_properties),
+                    .push(&mut indexing)
+                    .push(&mut mesh_properties)
+                    .push(&mut id_properties),
+            );
+            // Retain bindings 0..4 for existing material-preview cooks. Both the
+            // legacy alias and the new runtime array count against native limits.
+            let sampled_image_capacity = [
+                65_536,
+                indexing
+                    .max_per_stage_descriptor_update_after_bind_sampled_images
+                    .saturating_sub(128),
+                indexing
+                    .max_descriptor_set_update_after_bind_sampled_images
+                    .saturating_sub(128),
+                indexing
+                    .max_per_stage_update_after_bind_resources
+                    .saturating_sub(275),
+                indexing
+                    .max_update_after_bind_descriptors_in_all_pools
+                    .saturating_sub(275),
+            ]
+            .into_iter()
+            .min()
+            .unwrap_or(0);
+            ensure!(
+                sampled_image_capacity >= 128,
+                "Insufficient update-after-bind sampled-image capacity"
             );
             let info = DeviceInfo {
                 name: CStr::from_ptr(properties.device_name.as_ptr())
@@ -290,7 +340,15 @@ impl Gpu {
                 ),
                 vendor_id: properties.vendor_id,
                 device_id: properties.device_id,
+                discrete: properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU,
+                device_local_mib: memory.memory_heaps[..memory.memory_heap_count as usize]
+                    .iter()
+                    .filter(|heap| heap.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL))
+                    .map(|heap| heap.size / (1024 * 1024))
+                    .sum(),
                 ray_tracing,
+                texture_compression_bc: core_supported.texture_compression_bc != 0,
+                sampled_image_capacity,
                 mesh_shading,
                 mesh_dispatch: [
                     mesh_properties.max_mesh_work_group_count[0],
@@ -323,6 +381,13 @@ impl Gpu {
                     families[compute_family as usize].timestamp_valid_bits,
                 ],
                 pipeline_cache_uuid: properties.pipeline_cache_uuid.to_vec(),
+                external_memory,
+                identity: crate::shared::DeviceIdentity {
+                    device_uuid: id_properties.device_uuid,
+                    driver_uuid: id_properties.driver_uuid,
+                    luid: (id_properties.device_luid_valid != 0)
+                        .then_some(id_properties.device_luid),
+                },
             };
             println!(
                 "{}; graphics family {graphics_family}; compute-only family {compute_family}",
@@ -350,6 +415,7 @@ impl Gpu {
                     as_properties.min_acceleration_structure_scratch_offset_alignment,
                 ),
                 buffers: vec![],
+                buffer_memory: Default::default(),
                 images: vec![],
                 structures: vec![],
             })

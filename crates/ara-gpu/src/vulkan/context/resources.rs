@@ -1,4 +1,5 @@
 use super::Gpu;
+use super::buffer_memory::MemoryKey;
 use anyhow::{Context, Result, ensure};
 use ash::vk;
 use ash::vk::TaggedStructure;
@@ -11,6 +12,7 @@ pub(crate) struct BufferAllocation {
     pub size: u64,
     pub host: bool,
     pub usage: vk::BufferUsageFlags,
+    memory_key: Option<MemoryKey>,
 }
 /// ImageAllocation, view and allocation retained together by Gpu.
 #[derive(Clone, Copy)]
@@ -20,6 +22,7 @@ pub(crate) struct ImageAllocation {
     pub view: vk::ImageView,
     pub width: u32,
     pub height: u32,
+    pub mip_levels: u32,
     pub format: vk::Format,
     pub aspect: vk::ImageAspectFlags,
     pub usage: vk::ImageUsageFlags,
@@ -45,22 +48,42 @@ impl Gpu {
             )?;
             let mut memory = vk::DeviceMemory::null();
             let result = (|| -> Result<_> {
-                let requirements = self.device.get_buffer_memory_requirements(handle);
+                let mut dedicated = vk::MemoryDedicatedRequirements::default();
+                let mut requirements = vk::MemoryRequirements2::default().push(&mut dedicated);
+                self.device.get_buffer_memory_requirements2(
+                    &vk::BufferMemoryRequirementsInfo2::default().buffer(handle),
+                    &mut requirements,
+                );
+                let requirements = requirements.memory_requirements;
                 let flags = if host {
                     vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
                 } else {
                     vk::MemoryPropertyFlags::DEVICE_LOCAL
                 };
                 let memory_type_index = self.memory_type(requirements.memory_type_bits, flags)?;
+                let key = MemoryKey {
+                    size: requirements.size,
+                    memory_type: memory_type_index,
+                    device_address: usage.contains(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS),
+                };
+                let memory_key =
+                    (dedicated.requires_dedicated_allocation == vk::FALSE).then_some(key);
                 let mut address_flags = vk::MemoryAllocateFlagsInfo::default()
                     .flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
+                let mut dedicated_info = vk::MemoryDedicatedAllocateInfo::default().buffer(handle);
                 let mut allocation = vk::MemoryAllocateInfo::default()
                     .allocation_size(requirements.size)
                     .memory_type_index(memory_type_index);
-                if usage.contains(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS) {
+                if key.device_address {
                     allocation = allocation.push(&mut address_flags);
                 }
-                memory = self.device.allocate_memory(&allocation, None)?;
+                if memory_key.is_none() {
+                    allocation = allocation.push(&mut dedicated_info);
+                }
+                memory = match memory_key.and_then(|key| self.buffer_memory.take(key)) {
+                    Some(memory) => memory,
+                    None => self.device.allocate_memory(&allocation, None)?,
+                };
                 self.device.bind_buffer_memory(handle, memory, 0)?;
                 Ok(BufferAllocation {
                     handle,
@@ -68,6 +91,7 @@ impl Gpu {
                     size,
                     host,
                     usage,
+                    memory_key,
                 })
             })();
             let buffer = match result {
@@ -85,7 +109,7 @@ impl Gpu {
         }
     }
 
-    fn memory_type(&self, bits: u32, flags: vk::MemoryPropertyFlags) -> Result<u32> {
+    pub(crate) fn memory_type(&self, bits: u32, flags: vk::MemoryPropertyFlags) -> Result<u32> {
         (0..self.memory.memory_type_count)
             .find(|i| {
                 bits & (1 << i) != 0
@@ -142,12 +166,13 @@ impl Gpu {
         }
     }
 
-    /// Allocate a single-mip 2D image and its matching view.
+    /// Allocate a 2D image and a view spanning its complete resident mip chain.
     pub(crate) fn image(
         &mut self,
         width: u32,
         height: u32,
         format: vk::Format,
+        mip_levels: u32,
         usage: vk::ImageUsageFlags,
         aspect: vk::ImageAspectFlags,
     ) -> Result<ImageAllocation> {
@@ -162,7 +187,7 @@ impl Gpu {
                         height,
                         depth: 1,
                     })
-                    .mip_levels(1)
+                    .mip_levels(mip_levels)
                     .array_layers(1)
                     .samples(vk::SampleCountFlags::TYPE_1)
                     .tiling(vk::ImageTiling::OPTIMAL)
@@ -189,7 +214,7 @@ impl Gpu {
                         .image(handle)
                         .view_type(vk::ImageViewType::TYPE_2D)
                         .format(format)
-                        .subresource_range(range(aspect)),
+                        .subresource_range(range(aspect).level_count(mip_levels)),
                     None,
                 )?;
                 Ok(ImageAllocation {
@@ -198,6 +223,7 @@ impl Gpu {
                     view,
                     width,
                     height,
+                    mip_levels,
                     format,
                     aspect,
                     usage,
@@ -288,7 +314,14 @@ impl Gpu {
         // SAFETY: Caller proved every referencing queue completed before retirement.
         unsafe {
             self.device.destroy_buffer(buffer.handle, None);
-            self.device.free_memory(buffer.memory, None);
+            // Only memory is reused: a new exclusive VkBuffer starts with fresh
+            // queue ownership and cannot inherit the retired buffer's access state.
+            if !buffer
+                .memory_key
+                .is_some_and(|key| self.buffer_memory.retain(key, buffer.memory))
+            {
+                self.device.free_memory(buffer.memory, None);
+            }
         }
     }
     /// Destroy a timeline-retired image, removing the teardown record.

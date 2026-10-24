@@ -67,6 +67,9 @@ pub struct InputState {
     focus: Option<u64>,
     hover: Option<u64>,
     capture: Option<u64>,
+    /// Where the captured control was when pressed: a release there still activates
+    /// it after a rebuild or slow frame moved it (press/release match by stable ID).
+    capture_rect: Option<crate::paint::Box2>,
     drag: Option<(u64, serde_json::Value)>,
 }
 impl InputState {
@@ -99,6 +102,11 @@ impl InputState {
             })
         }).collect::<Vec<_>>())
     }
+    /// Whether the node can hold focus now: a focusable control, shown (not inside a
+    /// hidden subtree such as an inactive tab) and in the active scope.
+    fn can_focus(&self, ui: &Ui, index: usize) -> bool {
+        is_focusable(&ui.nodes[index]) && ui.shown(index) && self.in_scope(ui, index)
+    }
     fn in_scope(&self, ui: &Ui, index: usize) -> bool {
         self.scopes.last().is_none_or(|scope| {
             let mut i = Some(index);
@@ -120,7 +128,7 @@ impl InputState {
         modal: bool,
     ) -> Result<()> {
         if ui.by_id(root).is_none() {
-            return Err("ARA7045: input scope root not found".into());
+            return Err("ARA4045: input scope root not found".into());
         }
         if let Some(s) = self.scopes.last_mut() {
             s.focus = self.focus;
@@ -168,10 +176,7 @@ impl InputState {
             .scopes
             .last()
             .and_then(|s| s.focus)
-            .filter(|id| {
-                ui.by_id(*id)
-                    .is_some_and(|i| is_focusable(&ui.nodes[i]) && self.in_scope(ui, i))
-            })
+            .filter(|id| ui.by_id(*id).is_some_and(|i| self.can_focus(ui, i)))
             .or_else(|| {
                 ui.paint_order
                     .iter()
@@ -184,12 +189,10 @@ impl InputState {
     }
     /// Explicitly focus a control in the active scope.
     pub fn focus(&mut self, ui: &mut Ui, id: u64) -> Result<()> {
-        if ui
-            .by_id(id)
-            .is_none_or(|i| !is_focusable(&ui.nodes[i]) || !self.in_scope(ui, i))
-        {
+        if ui.by_id(id).is_none_or(|i| !self.can_focus(ui, i)) {
             return Err(
-                "ARA7045: focus target is disabled, clipped or outside the active scope".into(),
+                "ARA4045: focus target is disabled, clipped, hidden or outside the active scope"
+                    .into(),
             );
         }
         self.focus_to(ui, Some(id));
@@ -215,7 +218,7 @@ impl InputState {
     pub fn begin_drag(&mut self, payload: serde_json::Value) -> Result<()> {
         let source = self
             .capture
-            .ok_or("ARA7045: drag requires pointer capture")?;
+            .ok_or("ARA4045: drag requires pointer capture")?;
         self.drag = Some((source, payload));
         Ok(())
     }
@@ -226,10 +229,9 @@ impl InputState {
         event: InputEvent,
         clipboard: &mut dyn Clipboard,
     ) -> Result<()> {
+        // Focus never stays on a control that went away, was disabled or was hidden.
         if let Some(id) = self.focus
-            && ui
-                .by_id(id)
-                .is_none_or(|i| !is_focusable(&ui.nodes[i]) || !self.in_scope(ui, i))
+            && ui.by_id(id).is_none_or(|i| !self.can_focus(ui, i))
         {
             self.focus_to(ui, None);
         }
@@ -270,8 +272,23 @@ impl InputState {
             InputEvent::PointerDown(p) => {
                 if let Some(i) = hit(self, ui, p) {
                     let id = stable_id(&ui.nodes[i].element.id);
+                    // An unfocused input is drawn from its start (no caret scroll):
+                    // put the caret there so the click lands where the text shows.
+                    if !ui.nodes[i].state.focus
+                        && matches!(ui.widgets.get(&id), Some(crate::widgets::Widget::Input(_)))
+                    {
+                        ui.edit(
+                            i,
+                            EditEvent::Select {
+                                anchor: 0,
+                                caret: 0,
+                            },
+                            clipboard,
+                        )?;
+                    }
                     self.focus_to(ui, Some(id));
                     self.capture = Some(id);
+                    self.capture_rect = Some(ui.nodes[i].rect);
                     ui.select_text_at(i, p, false, clipboard)?;
                     let mut state = ui.nodes[i].state;
                     state.active = true;
@@ -281,6 +298,7 @@ impl InputState {
             }
             InputEvent::PointerUp(p) => {
                 let captured = self.capture.take();
+                let pressed_at = self.capture_rect.take();
                 if let Some(i) = captured.and_then(|id| ui.by_id(id)) {
                     let mut state = ui.nodes[i].state;
                     state.active = false;
@@ -292,7 +310,10 @@ impl InputState {
                                 serde_json::json!({"source":source,"payload":payload}),
                             );
                         }
-                    } else if hit(self, ui, p) == Some(i)
+                    } else if (hit(self, ui, p) == Some(i)
+                        || pressed_at.is_some_and(|r| r.contains(p[0], p[1]))
+                            && is_focusable(&ui.nodes[i])
+                            && self.in_scope(ui, i))
                         && !matches!(
                             ui.widgets.get(&stable_id(&ui.nodes[i].element.id)),
                             Some(

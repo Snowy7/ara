@@ -1,7 +1,7 @@
 use super::Context;
 use crate::{
     GpuError, Result,
-    cooked::{CookedPipeline, Stage, binding_layout_hash},
+    cooked::{CookedPipeline, Stage, binding_layout_hash, legacy_preview_layout_hash},
 };
 use ash::vk::{self, TaggedStructure};
 use sha2::{Digest, Sha256};
@@ -23,7 +23,36 @@ pub(super) fn create(
     cooked: &CookedPipeline,
     dir: &Path,
 ) -> Result<NativePipeline> {
-    if cooked.version != 1 || cooked.binding_layout_hash != binding_layout_hash() {
+    create_on_device(
+        &gpu.device,
+        gpu.info.mesh_shading,
+        layout,
+        cache,
+        cooked,
+        dir,
+    )
+}
+
+/// The caller retains device/layout ownership until compilation finishes; cache access is exclusive.
+pub(super) fn create_on_device(
+    device: &ash::Device,
+    mesh_shading: bool,
+    layout: vk::PipelineLayout,
+    cache: vk::PipelineCache,
+    cooked: &CookedPipeline,
+    dir: &Path,
+) -> Result<NativePipeline> {
+    let legacy_preview = cooked.stages.len() == 2
+        && cooked.stages.iter().all(|stage| {
+            matches!(
+                (stage.stage, stage.source_entry.as_str()),
+                (Stage::Vertex, "previewVertex") | (Stage::Fragment, "previewFragment")
+            )
+        });
+    if cooked.version != 1
+        || (cooked.binding_layout_hash != binding_layout_hash()
+            && !(legacy_preview && cooked.binding_layout_hash == legacy_preview_layout_hash()))
+    {
         return Err(GpuError::Contract(
             "Cooked layout/schema mismatch; recook shaders".into(),
         ));
@@ -31,7 +60,7 @@ pub(super) fn create(
     let mesh = cooked.stages.iter().any(|s| s.stage == Stage::Mesh);
     let task = cooked.stages.iter().any(|s| s.stage == Stage::Task);
     if (mesh || task)
-        && (!gpu.info.mesh_shading
+        && (!mesh_shading
             || !mesh
             || cooked
                 .stages
@@ -58,7 +87,7 @@ pub(super) fn create(
             // SAFETY: Offline SPIR-V has a checked content hash and correct word alignment.
             modules.push(
                 unsafe {
-                    gpu.device.create_shader_module(
+                    device.create_shader_module(
                         &vk::ShaderModuleCreateInfo::default().code(&words),
                         None,
                     )
@@ -90,7 +119,7 @@ pub(super) fn create(
         // SAFETY: State and shader modules remain live through creation; host cache access is exclusive.
         let handle = unsafe {
             if compute {
-                gpu.device.create_compute_pipelines(
+                device.create_compute_pipelines(
                     cache,
                     &[vk::ComputePipelineCreateInfo::default()
                         .layout(layout)
@@ -188,14 +217,14 @@ pub(super) fn create(
                         .vertex_input_state(&input)
                         .input_assembly_state(&assembly);
                 }
-                gpu.device.create_graphics_pipelines(cache, &[info], None)
+                device.create_graphics_pipelines(cache, &[info], None)
             }
         }
         .map_err(|(partial, error)| {
             // SAFETY: Partially created pipelines have not been submitted.
             unsafe {
                 for pipeline in partial {
-                    gpu.device.destroy_pipeline(pipeline, None);
+                    device.destroy_pipeline(pipeline, None);
                 }
             }
             GpuError::Backend(anyhow::anyhow!("Pipeline creation: {error:?}"))
@@ -217,7 +246,7 @@ pub(super) fn create(
     // SAFETY: Pipelines retain compiled shader state; modules are not needed after creation.
     unsafe {
         for module in modules {
-            gpu.device.destroy_shader_module(module, None);
+            device.destroy_shader_module(module, None);
         }
     }
     result

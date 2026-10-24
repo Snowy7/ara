@@ -1,15 +1,15 @@
 {
-  "binding_layout_hash": "1bb570eb9803435af351c803ea8ba5187b90052fdb0fc03c9f2140544242710f",
+  "binding_layout_hash": "35cd2a62b1ba741ce6823b3c8753d7b5aa97b54c5f0a837b56e542518013fd7e",
   "compiler": "2026.17-25-gc7954ebd1",
-  "key": "aaca1410d7d2d9203a854b71bde69d4fb770220db3d2db6010befbd5cfccc3ce",
+  "key": "f1a4b8ed976206787a15b17776937231d71dec874a7dc441a3a1fa6d9ef21f9b",
   "stages": [
     {
-      "dxil": "aaca1410d7d2d9203a854b71bde69d4fb770220db3d2db6010befbd5cfccc3ce/reservoirSpatialLayers.dxil",
-      "dxil_hash": "41960b13d53dea2ce20c74953d5b9d7ee3e499a875a3167ea7642048dd5ef2c9",
+      "dxil": "2dfc85074c133341d441b28c390795f16cc8c1073a9cdf4f6074683db281560c/reservoirSpatialLayers.dxil",
+      "dxil_hash": "2b909e99b1c49051c9c5b4ffe6c2d4c9ef46abbbb7547546ab02ee17bbc87d6d",
       "source_entry": "reservoirSpatialLayers",
-      "spirv": "aaca1410d7d2d9203a854b71bde69d4fb770220db3d2db6010befbd5cfccc3ce/reservoirSpatialLayers.spv",
+      "spirv": "2dfc85074c133341d441b28c390795f16cc8c1073a9cdf4f6074683db281560c/reservoirSpatialLayers.spv",
       "spirv_entry": "main",
-      "spirv_hash": "371956f2d6887f2401d87209036953dddb1ce4adf32cd1cb12611236e0eef336",
+      "spirv_hash": "9726b72f4f8ae35d187d39a2ebddd0b7f5fcf065f98b5a2e7598ad4243794931",
       "stage": "compute"
     }
   ],

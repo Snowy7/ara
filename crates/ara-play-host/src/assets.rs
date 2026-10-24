@@ -7,13 +7,17 @@
 //! Generations published during Play reach players only when allowed or approved.
 //! A sidecar recorded by an older importer is upgraded (one typed
 //! `SidecarCommand::Version` transaction, an info diagnostic) and reimported; only an
-//! importer older than the sidecar's, or a failed import, is an error.
+//! importer older than the sidecar's, or a failed import, produces a diagnostic and
+//! keeps the last good generation (a placeholder when none exists).
 use ara_asset::{
-    AssetChanged, AssetPipeline, FileCache, ProcessWorker, ReloadEvent, Sidecar, SidecarCommand,
-    SourceAsset, TargetPlatform, VersionCheck,
+    AssetChanged, AssetPipeline, FileCache, ImportSettings, ProcessWorker, ReloadEvent, Sidecar,
+    SidecarCommand, SourceAsset, TargetPlatform, VersionCheck,
 };
 use ara_diag::Diagnostic;
 use ara_schema::SchemaDb;
+mod progress;
+pub use progress::CookProgress;
+use progress::CookWatch;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
@@ -27,6 +31,10 @@ pub struct Assets {
     sources: BTreeSet<String>,
     failures: BTreeMap<String, String>,
     notes: Vec<Diagnostic>,
+    installed: BTreeMap<String, String>,
+    configurations: BTreeMap<String, (String, ara_doc::Record)>,
+    revision: Option<u64>,
+    published: crate::published::Publisher,
     /// Cache directory shared with players.
     pub cache: PathBuf,
 }
@@ -51,6 +59,58 @@ fn sidecars(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 impl Assets {
+    /// Waits while requested cooks make progress, without imposing a total export
+    /// deadline. Completed generations reset `stall_timeout`; queue/admission and
+    /// importer progress messages do not. Reports changes and five-second heartbeats.
+    pub fn pins_with_progress(
+        &mut self,
+        wanted: &BTreeSet<String>,
+        stall_timeout: Duration,
+        mut report: impl FnMut(CookProgress) -> Result<(), String>,
+    ) -> Result<BTreeMap<String, String>, String> {
+        let start = Instant::now();
+        let mut watch = CookWatch::new();
+        let mut last_report = None;
+        loop {
+            self.poll(false, true);
+            let requested: Vec<_> = wanted
+                .iter()
+                .filter(|id| self.sources.contains(*id))
+                .collect();
+            let pending: Vec<_> = requested
+                .iter()
+                .copied()
+                .filter(|id| {
+                    !self.failures.contains_key(*id)
+                        && (self.digest(id).is_none() || self.pipeline.is_importing_asset(id))
+                })
+                .collect();
+            let completed = requested
+                .iter()
+                .filter(|id| self.digest(id).is_some() && !self.pipeline.is_importing_asset(id))
+                .count();
+            let state = watch.observe(completed, requested.len(), start.elapsed());
+            if last_report.is_none_or(|(count, elapsed)| {
+                count != completed
+                    || state.elapsed.saturating_sub(elapsed) >= Duration::from_secs(5)
+            }) {
+                report(state)?;
+                last_report = Some((completed, state.elapsed));
+            }
+            if pending.is_empty() {
+                return Ok(self.finished_pins(wanted));
+            }
+            if state.stalled >= stall_timeout {
+                return Err(format!(
+                    "ARA-EXP-COOK-001: no requested cook completed for {stall_timeout:?} ({completed}/{} complete, {:?} total); pending assets: {pending:?}",
+                    requested.len(),
+                    state.elapsed,
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     /// Registers every sidecar under `root` and requests imports in the background.
     /// `worker` is the import worker executable (`ara-import-worker`).
     pub fn new(root: &Path, worker: &Path) -> Result<Self, String> {
@@ -59,6 +119,7 @@ impl Assets {
         ara_asset::register_schema(&mut schema);
         let cache = FileCache::new(root).map_err(|e| e.to_string())?;
         let cache_dir = cache.root().to_path_buf();
+        let published = crate::published::Publisher::new(root, cache.clone())?;
         let mut pipeline = AssetPipeline::new(
             root,
             ProcessWorker::new(worker),
@@ -136,7 +197,9 @@ impl Assets {
                     asset_dependencies: BTreeMap::new(),
                 })
                 .map_err(|e| e.to_string())?;
-            pipeline.request(&id).map_err(|e| e.to_string())?;
+            if let Err(error) = pipeline.request(&id) {
+                failures.insert(id.clone(), error.to_string());
+            }
             sources.insert(id);
         }
         Ok(Self {
@@ -144,11 +207,102 @@ impl Assets {
             sources,
             failures,
             notes,
+            installed,
+            configurations: BTreeMap::new(),
+            revision: None,
+            published,
             cache: cache_dir,
         })
     }
 
-    /// Info diagnostics (importer upgrades) not yet reported.
+    /// Synchronizes command-authored sidecars before Play or hot reload. In-memory
+    /// settings are authoritative even before the host's canonical debounced save.
+    pub fn synchronize(
+        &mut self,
+        workspace: &ara_doc::Workspace,
+        revision: u64,
+    ) -> Result<(), String> {
+        if self.revision == Some(revision) {
+            return Ok(());
+        }
+        let mut current = BTreeMap::new();
+        for (path, doc) in workspace.docs().filter(|(_, doc)| doc.kind == "import") {
+            let record = doc
+                .record("i_settings")
+                .ok_or_else(|| format!("{path}: missing import settings"))?;
+            let source = path
+                .strip_suffix(".import.json")
+                .ok_or_else(|| format!("{path}: import document must name a sidecar"))?;
+            let id = doc.id.to_string();
+            let configuration = (source.to_owned(), record.clone());
+            if self.configurations.get(&id) != Some(&configuration) {
+                let mut settings: ImportSettings =
+                    serde_json::from_value(serde_json::Value::Object(record.clone()))
+                        .map_err(|e| format!("{path}: {e}"))?;
+                self.sources.insert(id.clone());
+                if let Some(installed) = self.installed.get(&settings.importer) {
+                    match settings.check_version(installed) {
+                        VersionCheck::Current => {}
+                        VersionCheck::Upgrade => settings.version = installed.clone(),
+                        VersionCheck::Newer => {
+                            self.pipeline.unregister(&id);
+                            self.failures.insert(
+                                id.clone(),
+                                format!(
+                                    "{path} needs {} {}, newer than this engine's {installed}",
+                                    settings.importer, settings.version
+                                ),
+                            );
+                            current.insert(id, configuration);
+                            continue;
+                        }
+                    }
+                }
+                self.pipeline
+                    .configure(
+                        SourceAsset {
+                            id: id.clone(),
+                            path: source.to_owned(),
+                            preset: settings.preset,
+                            thread_budget: 4,
+                            importer: settings.importer,
+                            version: settings.version,
+                            settings: settings.settings,
+                            target: if cfg!(target_os = "macos") {
+                                TargetPlatform::MacOs
+                            } else if cfg!(target_os = "linux") {
+                                TargetPlatform::Linux
+                            } else {
+                                TargetPlatform::Windows
+                            },
+                            asset_dependencies: BTreeMap::new(),
+                        },
+                        settings.dependencies,
+                    )
+                    .map_err(|e| e.to_string())?;
+                self.failures.remove(&id);
+                if let Err(error) = self.pipeline.request(&id) {
+                    self.failures.insert(id.clone(), error.to_string());
+                }
+            }
+            current.insert(id, configuration);
+        }
+        for id in self
+            .configurations
+            .keys()
+            .filter(|id| !current.contains_key(*id))
+        {
+            self.pipeline.unregister(id);
+            self.sources.remove(id);
+            self.failures.remove(id);
+        }
+        self.configurations = current;
+        self.published.retain(&self.sources);
+        self.revision = Some(revision);
+        Ok(())
+    }
+
+    /// Importer upgrades and failed-import placeholder diagnostics not yet reported.
     pub fn take_notes(&mut self) -> Vec<Diagnostic> {
         std::mem::take(&mut self.notes)
     }
@@ -169,13 +323,16 @@ impl Assets {
             }
         }
         self.pipeline.reload.allow_during_play = allow;
-        self.pipeline
+        let changes = self
+            .pipeline
             .apply_boundary(true, playing, &BTreeSet::new())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        self.published.complete(&changes, &self.pipeline.reload);
+        changes
     }
 
-    /// The published generation of every source (hex digest), when all of `wanted` are
-    /// published; waits up to `timeout` (first cooks of a fresh clone take seconds).
+    /// Published source generations (hex digests), waiting up to `timeout` for
+    /// `wanted`. Failed imports keep a last-good generation or a diagnosed placeholder.
     pub fn pins(
         &mut self,
         wanted: &BTreeSet<String>,
@@ -186,13 +343,14 @@ impl Assets {
             self.poll(false, true);
             let missing: Vec<&String> = wanted
                 .iter()
-                .filter(|id| self.sources.contains(*id) && self.digest(id).is_none())
+                .filter(|id| {
+                    self.sources.contains(*id)
+                        && !self.failures.contains_key(*id)
+                        && (self.digest(id).is_none() || self.pipeline.is_importing_asset(id))
+                })
                 .collect();
             if missing.is_empty() {
                 break;
-            }
-            if let Some((asset, error)) = self.failures.iter().find(|(a, _)| wanted.contains(*a)) {
-                return Err(format!("import of {asset} failed: {error}"));
             }
             if start.elapsed() > timeout {
                 return Err(format!(
@@ -201,11 +359,26 @@ impl Assets {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
-        Ok(self
-            .sources
+        Ok(self.finished_pins(wanted))
+    }
+
+    fn finished_pins(&mut self, wanted: &BTreeSet<String>) -> BTreeMap<String, String> {
+        for (asset, error) in self
+            .failures
+            .iter()
+            .filter(|(asset, _)| wanted.contains(*asset))
+        {
+            self.notes.push(Diagnostic::warning(
+                crate::codes::ASSETS,
+                format!(
+                    "import of {asset} failed: {error}; Play will use a placeholder where no previous generation exists"
+                ),
+            ));
+        }
+        self.sources
             .iter()
             .filter_map(|id| Some((id.clone(), self.digest(id)?)))
-            .collect())
+            .collect()
     }
 
     /// The live generation digest of `asset` as hex.

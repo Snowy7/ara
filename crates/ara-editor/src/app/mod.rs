@@ -1,7 +1,11 @@
 //! SDL event loop and same-device native UI/scene composition.
 mod capture;
 mod controller;
+mod game;
+mod journey;
 mod panels_verify;
+mod responsiveness;
+mod scene_sync;
 mod setup;
 mod ux_verify;
 mod verify;
@@ -32,19 +36,20 @@ use std::{
     path::PathBuf,
     time::{Duration, Instant},
 };
+/// How long after the last input progressive Scene frames resume.
+const INTERACTION_PAUSE: Duration = Duration::from_millis(250);
 /// Open the SDL3 editor, host the project authority and serve authenticated EP/MCP.
 pub fn run(options: Options) -> ara_ui::Result<()> {
+    if options.headless {
+        return headless(options);
+    }
     if options.verify_panels || options.verify_ux {
         panels_verify::fixtures(&options.project)?;
     }
-    // Verification and screenshots keep preferences in the output folder, never the user's profile.
-    let user_settings =
-        if options.verify || options.verify_panels || options.verify_ux || options.screenshot {
-            Some(options.output.join("user-settings.json"))
-        } else {
-            crate::settings::user_settings_path()
-        };
-    let mut editor = Editor::open_with(&options.project, user_settings)?;
+    // Bounded runs resolve an isolated ARA_CONFIG_DIR (`Options::isolate_profile`);
+    // tests and cargo runs are refused the owner's profile.
+    let user_settings = crate::settings::user_settings_path()?;
+    let mut editor = Editor::open_with(&options.project, Some(user_settings))?;
     setup::prepare(&mut editor, &options)?;
     let mut server = Server::start(editor.host.root())?;
     eprintln!(
@@ -60,7 +65,14 @@ pub fn run(options: Options) -> ara_ui::Result<()> {
             .unwrap_or_default()
             .to_string_lossy()
     );
-    let window = Window::new(&title, options.size)?;
+    // Bounded runs (captures, verification routes) never put a window on the desktop:
+    // they render offscreen and read the UI target back.
+    let offscreen = options.offscreen();
+    let window = if offscreen {
+        Window::hidden(&title, options.size)?
+    } else {
+        Window::new(&title, options.size)?
+    };
     let mut native = Native::attach(&title)?;
     if options.verify || options.verify_panels || options.verify_ux || options.screenshot {
         native.verification_extent(options.size)?;
@@ -75,36 +87,54 @@ pub fn run(options: Options) -> ara_ui::Result<()> {
         eprintln!("Verification extent {physical:?}; logical {logical:?}; DPI {dpi}");
     }
     let mut shell = Shell::new(&mut editor, logical)?;
+    shell.offscreen = offscreen;
     let mut view = editor.view()?;
+    editor.report_missing_sources(&view);
     let viewport = shell.viewport().unwrap_or(ara_ui::paint::Box2 {
         x: 0.,
         y: 0.,
         w: 800.,
         h: 600.,
     });
-    let mut renderer = Renderer::new(
-        view.scene(editor.host.root(), &editor.state, None)?,
+    // The publication the first extraction sees; SceneSync re-extracts on newer ones.
+    let models_at_open = editor.models.revision();
+    let create_renderer =
+        if crate::world::gltf::render_settings(editor.host.store().workspace())?.ray_tracing {
+            Renderer::new
+        } else {
+            Renderer::new_raster
+        };
+    let mut renderer = create_renderer(
+        view.scene(editor.host.root(), &editor.state, None, &mut editor.models)?,
         extent_scaled(viewport, dpi),
         &window.extensions()?,
         editor.host.root().join(".ara/gpu"),
     )?;
+    detect_quality(&mut editor, &renderer);
     // SAFETY: Renderer/device are declared before the UI adapter, and survive its destruction.
     let mut gpu = unsafe { NativeUi::new(renderer.gpu().context())? };
     shell.device_info =
         serde_json::to_string_pretty(&renderer.gpu().context().info).unwrap_or_default();
     let mut floats = windows::Floats::default();
+    floats.hidden = offscreen;
+    let mut game = game::GameView::default();
     gpu.set_dpi(dpi)?;
     let mut ui_renderer = UiRenderer::default();
-    crate::shell::icons::install(&mut ui_renderer, editor.state.light, dpi)?;
-    let mut icon_state = (editor.state.light, dpi);
-    ui_renderer.image(
-        overlay::viewport_image(),
-        Image {
-            width: 1,
-            height: 1,
-            rgba: vec![0, 0, 0, 255],
-        },
-    )?;
+    crate::shell::icons::install(&mut ui_renderer, dpi)?;
+    // Icons are white masks tinted by CSS: only a DPI change (or a verification
+    // capture at another scale, `None`) re-rasterizes them; themes never do.
+    let mut icon_dpi = Some(dpi);
+    // Placeholders for the GPU-fed images: the Scene view and the Game view.
+    for id in [overlay::viewport_image(), game::texture()] {
+        ui_renderer.image(
+            id,
+            Image {
+                width: 1,
+                height: 1,
+                rgba: vec![0, 0, 0, 255],
+            },
+        )?;
+    }
     // SAFETY: Both native owners are retained until explicit idle/destroy after the loop, including errors.
     let mut present = unsafe { Present::new(renderer.gpu().context(), &window)? };
     let mut scene_view = viewport::SceneView::default();
@@ -128,7 +158,24 @@ pub fn run(options: Options) -> ara_ui::Result<()> {
     } else {
         None
     };
-    if panel_verification.is_some() || ux_verification.is_some() {
+    let mut probe = options
+        .verify_responsiveness
+        .then(|| responsiveness::Probe::new(&options.output));
+    if probe.is_some() {
+        // Measure from the default layout and theme, whatever an earlier run left.
+        editor.action("editor.layout.reset", json!({}))?;
+        editor.action("editor.theme", json!({"light": false}))?;
+    }
+    let mut journey = if options.verify_journey {
+        Some(journey::Journey::new(&mut editor, &options.output)?)
+    } else {
+        None
+    };
+    if panel_verification.is_some()
+        || ux_verification.is_some()
+        || journey.is_some()
+        || probe.is_some()
+    {
         shell.rebuild(&mut editor)?;
     }
 
@@ -139,10 +186,12 @@ pub fn run(options: Options) -> ara_ui::Result<()> {
     let result = (|| -> ara_ui::Result<()> {
         let mut last_revision = editor.host.store().revision();
         let mut last_view = editor.view_revision;
+        let mut last_scene = editor.scene_revision;
         let mut last_panels = editor.panels_revision;
         let mut last_review = editor.review_revision;
         let mut last_extraction = editor.extraction_revision;
-        let mut preview_present = false;
+        // Value edits, typed drafts and gizmo drags patch the Scene in place.
+        let mut scene_sync = scene_sync::SceneSync::new(models_at_open);
         let mut last_physical = physical;
         let mut last_dpi = dpi;
         let mut dirty = true;
@@ -157,8 +206,14 @@ pub fn run(options: Options) -> ara_ui::Result<()> {
         let mut wall_samples = Vec::new();
         let mut last_ui = 0;
         let frame_budget = Duration::from_secs_f64(1. / 144.);
+        // The last pointer, key or wheel input: progressive Scene frames wait while the
+        // user is working (see below).
+        let mut last_input: Option<Instant> = None;
         let mut previous = Instant::now();
         loop {
+            if let Some(probe) = &mut probe {
+                probe.begin(&mut shell);
+            }
             let profile_frame = if editor.host.profiler().is_recording() {
                 editor.host.profiler().begin_frame().ok()
             } else {
@@ -175,10 +230,30 @@ pub fn run(options: Options) -> ara_ui::Result<()> {
             let mut graph_start = None;
             let dt = frame_start.duration_since(previous).as_secs_f32().min(0.05);
             previous = frame_start;
-            let events = Window::poll_tagged()?;
-            let interaction_start = (!events.is_empty()).then(Instant::now);
-            let mut quit = false;
+            let mut events = Window::poll_tagged()?;
             let main_dpi = options.dpi.unwrap_or_else(|| native.dpi()) * windows::ui_scale(&editor);
+            let mut inject_ms = 0.;
+            if let Some(probe) = &mut probe {
+                let scale = crate::native::points_to_logical(window.raw(), main_dpi);
+                let at = Instant::now();
+                probe.inject(&mut editor, &mut shell, scale, &mut events)?;
+                inject_ms = at.elapsed().as_secs_f64() * 1000.;
+            }
+            let interaction_start = (!events.is_empty()).then(Instant::now);
+            if events.iter().any(|(_, event)| {
+                matches!(
+                    event,
+                    Event::MouseMotion { .. }
+                        | Event::MouseButton { .. }
+                        | Event::Wheel(_)
+                        | Event::Key { .. }
+                )
+            }) || probe.as_ref().is_some_and(|p| p.acted())
+            {
+                last_input = Some(Instant::now());
+            }
+            let routed_at = Instant::now();
+            let mut quit = false;
             for (sdl, event) in events {
                 let routed = route_event(
                     sdl,
@@ -190,7 +265,7 @@ pub fn run(options: Options) -> ara_ui::Result<()> {
                     &mut controller,
                     &mut editor,
                     &mut shell,
-                    &renderer,
+                    &mut renderer,
                     &view,
                     &mut clipboard,
                 );
@@ -202,7 +277,7 @@ pub fn run(options: Options) -> ara_ui::Result<()> {
                     }
                     Err(error) => {
                         shell.leave();
-                        editor.report_error(&error.to_string());
+                        editor.report_failure(&*error);
                         dirty = true;
                     }
                 }
@@ -216,6 +291,7 @@ pub fn run(options: Options) -> ara_ui::Result<()> {
                         .profiler()
                         .end_frame(Default::default(), Default::default());
                 }
+                game.close(&mut editor, &mut gpu)?;
                 break;
             }
             // IME text goes to the window with keyboard focus.
@@ -229,13 +305,19 @@ pub fn run(options: Options) -> ara_ui::Result<()> {
                 shell.enter(id);
             }
             match native.input(&mut shell.ui, &mut shell.input) {
-                Ok(changed) => dirty |= changed,
-                Err(error) => editor.report_error(&error.to_string()),
+                Ok(changed) => {
+                    dirty |= changed;
+                    // Typed text (IME commits) is input too.
+                    if changed {
+                        last_input = Some(Instant::now());
+                    }
+                }
+                Err(error) => editor.report_failure(&*error),
             }
             shell.leave();
             match shell.dispatch(&mut editor) {
                 Ok(changed) => dirty |= changed,
-                Err(error) => editor.report_error(&error.to_string()),
+                Err(error) => editor.report_failure(&*error),
             }
             for id in floats
                 .windows
@@ -248,10 +330,11 @@ pub fn run(options: Options) -> ara_ui::Result<()> {
                     shell.leave();
                     match result {
                         Ok(changed) => dirty |= changed,
-                        Err(error) => editor.report_error(&error.to_string()),
+                        Err(error) => editor.report_failure(&*error),
                     }
                 }
             }
+            let input_ms = routed_at.elapsed().as_secs_f64() * 1000.;
             if let Some(request) = shell.window_request.take() {
                 match request {
                     crate::shell::WindowRequest::Fullscreen => window.toggle_fullscreen()?,
@@ -268,7 +351,7 @@ pub fn run(options: Options) -> ara_ui::Result<()> {
             }
             for path in imports.try_iter() {
                 if let Err(error) = import_file(&mut editor, &path) {
-                    editor.report_error(&error.to_string());
+                    editor.report_failure(&*error);
                 }
                 dirty = true;
             }
@@ -282,7 +365,7 @@ pub fn run(options: Options) -> ara_ui::Result<()> {
                     dirty |= changed;
                     scene_dirty |= changed;
                 }
-                Err(error) => editor.report_error(&error.to_string()),
+                Err(error) => editor.report_failure(&*error),
             }
             if (verification.as_ref().is_some_and(|v| v.finished())
                 || ux_verification.as_ref().is_some_and(|v| v.finished()))
@@ -297,8 +380,43 @@ pub fn run(options: Options) -> ara_ui::Result<()> {
                 scene_dirty = true;
             }
             let authority_scope = profile_frame.map(|_| ara_profile::scope("editor.authority"));
+            let tick_at = Instant::now();
             server.pump(&mut editor);
             editor.tick();
+            let tick_ms = tick_at.elapsed().as_secs_f64() * 1000.;
+            // The Game view: its size (physical pixels) is where embedded Play starts and
+            // what it resizes to; new frames redraw the UI.
+            if let Some(i) = shell.ui.find("game-surface") {
+                let r = shell.ui.nodes[i].rect;
+                let scale =
+                    options.dpi.unwrap_or_else(|| native.dpi()) * windows::ui_scale(&editor);
+                let frame = shell
+                    .ui
+                    .find("game-frame")
+                    .map(|f| shell.ui.nodes[f].rect)
+                    .filter(|f| f.w > 1. && f.h > 1.)
+                    .unwrap_or(r);
+                let size = [
+                    (frame.w * scale).round() as u32,
+                    (frame.h * scale).round() as u32,
+                ];
+                if size[0] >= 64 && size[1] >= 64 {
+                    shell.game_target = size;
+                    editor.game_size = size;
+                }
+            }
+            let was_live = shell.game_live;
+            let was_fault = shell.game_fault.clone();
+            let game_frame =
+                game.update(&mut editor, &mut shell, &mut gpu, renderer.gpu().context())?;
+            dirty |= game_frame;
+            if shell.game_live != was_live || shell.game_fault != was_fault {
+                if !shell.game_live {
+                    shell.game_captured = false;
+                }
+                shell.rebuild(&mut editor)?;
+                dirty = true;
+            }
             if shell.run_queued(&mut editor) {
                 dirty = true;
             }
@@ -328,32 +446,44 @@ pub fn run(options: Options) -> ara_ui::Result<()> {
                     last_dpi,
                 )?;
             }
-            if shell.poll_assets() {
+            if shell.poll_build(&mut editor) {
+                shell.rebuild(&mut editor)?;
+                dirty = true;
+            }
+            let assets_changed = shell.poll_assets();
+            for (kind, message) in std::mem::take(&mut shell.pending_reports) {
+                editor.report(kind, &message, None);
+            }
+            if assets_changed {
                 shell.rebuild(&mut editor)?;
                 dirty = true;
             }
             dirty |= shell.upload_thumbnails(&mut ui_renderer)?;
-            if editor.host.store().revision() != last_revision {
-                last_revision = editor.host.store().revision();
-                view = editor.view()?;
-                renderer.update_geometry(view.scene(
-                    editor.host.root(),
-                    &editor.state,
-                    editor.gesture.as_ref(),
-                )?)?;
-                shell.rebuild(&mut editor)?;
+            let geometry_at = Instant::now();
+            let mut view_ms = 0.;
+            let mut stages = scene_sync::Stages::default();
+            let idle = last_input.is_none_or(|t| t.elapsed() >= INTERACTION_PAUSE);
+            if scene_sync.refresh(&view, &mut editor, &mut renderer, &mut scene_view, idle) {
                 dirty = true;
                 scene_dirty = true;
-                preview_present = editor.gesture.is_some();
+            }
+            if editor.host.store().revision() != last_revision {
+                last_revision = editor.host.store().revision();
+                let at = Instant::now();
+                let next = editor.view()?;
+                editor.report_missing_sources(&next);
+                view_ms = at.elapsed().as_secs_f64() * 1000.;
+                stages =
+                    scene_sync.commit(&view, &next, &mut editor, &mut renderer, &mut scene_view);
+                view = next;
+                shell.rebuild_if_stale(&mut editor)?;
+                dirty = true;
+                scene_dirty = true;
             }
             if editor.extraction_revision != last_extraction {
                 last_extraction = editor.extraction_revision;
                 view = editor.view()?;
-                renderer.update_geometry(view.scene(
-                    editor.host.root(),
-                    &editor.state,
-                    editor.gesture.as_ref(),
-                )?)?;
+                scene_sync.rebuild(&view, &mut editor, &mut renderer, &mut scene_view);
                 dirty = true;
                 scene_dirty = true;
             }
@@ -361,25 +491,28 @@ pub fn run(options: Options) -> ara_ui::Result<()> {
                 last_review = editor.review_revision;
                 let next = editor.view()?;
                 if next.ghosts() != view.ghosts() {
-                    renderer.update_geometry(next.scene(
-                        editor.host.root(),
-                        &editor.state,
-                        editor.gesture.as_ref(),
-                    )?)?;
+                    scene_sync.rebuild(&next, &mut editor, &mut renderer, &mut scene_view);
                 }
                 view = next;
                 dirty = true;
                 scene_dirty = true;
             }
+            if scene_sync.preview(&view, &mut editor, &shell, &mut renderer, &mut scene_view) {
+                dirty = true;
+                scene_dirty = true;
+            }
+            let geometry_ms = geometry_at.elapsed().as_secs_f64() * 1000.;
             if editor.view_revision != last_view {
                 last_view = editor.view_revision;
                 dirty = true;
+            }
+            if editor.scene_revision != last_scene {
+                last_scene = editor.scene_revision;
                 scene_dirty = true;
             }
             if editor.panels_revision != last_panels {
                 last_panels = editor.panels_revision;
-                shell.rebuild(&mut editor)?;
-                dirty = true;
+                dirty |= shell.rebuild_if_stale(&mut editor)?;
             }
             if let Some(verification) = &mut verification {
                 let changed = verification.step(
@@ -388,12 +521,25 @@ pub fn run(options: Options) -> ara_ui::Result<()> {
                     &mut gpu,
                     &mut ui_renderer,
                     &mut renderer,
+                    &mut scene_view,
                 )?;
                 if changed {
-                    icon_state = (!editor.state.light, last_dpi);
+                    icon_dpi = None;
                 }
                 dirty |= changed;
                 scene_dirty |= dirty;
+            }
+            if let Some(route) = &mut journey {
+                let changed = route.step(
+                    &mut editor,
+                    &mut shell,
+                    &mut gpu,
+                    &mut ui_renderer,
+                    &mut renderer,
+                    &mut scene_view,
+                )?;
+                dirty |= changed;
+                scene_dirty |= changed;
             }
             if let Some(suite) = &mut ux_verification {
                 let was_finished = suite.finished();
@@ -404,9 +550,10 @@ pub fn run(options: Options) -> ara_ui::Result<()> {
                     &mut ui_renderer,
                     &mut renderer,
                     &floats,
+                    &mut scene_view,
                 )?;
                 if changed {
-                    icon_state = (!editor.state.light, last_dpi);
+                    icon_dpi = None;
                 }
                 dirty |= changed;
                 scene_dirty |= changed;
@@ -426,6 +573,7 @@ pub fn run(options: Options) -> ara_ui::Result<()> {
                     &mut gpu,
                     &mut ui_renderer,
                     &mut renderer,
+                    &mut scene_view,
                 )?;
                 dirty |= changed;
                 scene_dirty |= changed;
@@ -477,11 +625,23 @@ pub fn run(options: Options) -> ara_ui::Result<()> {
             shell.sync_canvas(&editor);
             shell.orient_axis(editor.state.camera);
             let ui_scope = profile_frame.map(|_| ara_profile::scope("editor.ui"));
+            let ui_at = Instant::now();
             let work = shell.frame()?;
+            let ui_ms = ui_at.elapsed().as_secs_f64() * 1000.;
+            let (mut render_ms, mut present_ms, mut presented) = (0., 0., false);
+            let (mut scene_ms, mut icons_ms) = (0., 0.);
             let graph_paint = graph_start.map(|start| start.elapsed().as_secs_f64() * 1000.);
             drop(ui_scope);
             dirty |= work.paint_nodes > 0 || work.layout_passes > 0 || work.restyled > 0;
-            if shell.viewport().is_some() && scene_view.needs_frame(editor.state.quality) {
+            // Progressive Scene frames (fidelity accumulation, newly published assets)
+            // block this thread for their GPU time (27-50 ms on large scenes), so they
+            // wait while the user is working: no pointer, key or wheel input for
+            // INTERACTION_PAUSE. A click or hover then never queues behind one. Scene
+            // changes made by input (camera, gizmo drags, edits) still render at once.
+            if shell.viewport().is_some()
+                && scene_view.needs_frame(editor.state.quality)
+                && (scene_dirty || last_input.is_none_or(|t| t.elapsed() >= INTERACTION_PAUSE))
+            {
                 dirty = true;
                 scene_dirty = true;
             }
@@ -489,21 +649,19 @@ pub fn run(options: Options) -> ara_ui::Result<()> {
                 let _render_scope = profile_frame.map(|_| ara_profile::scope("editor.render"));
                 profile_gpu = shell.viewport().is_some() && scene_dirty;
                 let render_start = Instant::now();
+                let scene_at = Instant::now();
                 if let Some(rect) = shell.viewport() {
                     renderer.resize(extent_scaled(rect, dpi))?;
-                    if scene_dirty {
-                        if editor.gesture.is_some() || preview_present {
-                            renderer.update_geometry(view.scene(
-                                editor.host.root(),
-                                &editor.state,
-                                editor.gesture.as_ref(),
-                            )?)?;
-                            preview_present = editor.gesture.is_some();
-                        }
-                        scene_view.render(&mut renderer, &editor, &view, 1)?;
+                    // A Scene that cannot render yet (models still publishing, a missing
+                    // source) keeps its last frame and is reported; the next change or
+                    // publication retries. It never closes the editor.
+                    if scene_dirty
+                        && let Err(error) = scene_view.render(&mut renderer, &editor, &view, 1)
+                    {
+                        editor.report_failure(&*error);
                     }
                     scene_view.attach(&mut gpu, &renderer, editor.state.quality)?;
-                    let mut changed = review_tints(&editor);
+                    let mut changed = editor.agent_tints();
                     for id in view.ghosts().keys() {
                         changed.insert(crate::world::render_id(id), "destructive-foreground");
                     }
@@ -545,12 +703,16 @@ pub fn run(options: Options) -> ara_ui::Result<()> {
                 } else {
                     gpu.overlays(Default::default(), overlay::ENTITY_IMAGE, Vec::new());
                 }
-                if icon_state != (editor.state.light, dpi) {
-                    crate::shell::icons::install(&mut ui_renderer, editor.state.light, dpi)?;
-                    icon_state = (editor.state.light, dpi);
+                scene_ms = scene_at.elapsed().as_secs_f64() * 1000.;
+                if icon_dpi != Some(dpi) {
+                    let icons_at = Instant::now();
+                    crate::shell::icons::install(&mut ui_renderer, dpi)?;
+                    icon_dpi = Some(dpi);
+                    icons_ms = icons_at.elapsed().as_secs_f64() * 1000.;
                 }
                 gpu.select_target(0);
                 gpu.set_dpi(dpi)?;
+                let render_at = Instant::now();
                 ui_renderer.render(
                     &mut gpu,
                     &shell.ui.display,
@@ -558,12 +720,16 @@ pub fn run(options: Options) -> ara_ui::Result<()> {
                     shell.ui.size.map(|v| v.round() as u32),
                     TextMode::Raster,
                 )?;
+                render_ms = render_at.elapsed().as_secs_f64() * 1000.;
                 let graph_gpu = graph_start.map(|start| start.elapsed().as_secs_f64() * 1000.);
                 let (image, size) = gpu.output()?;
+                let present_at = Instant::now();
                 // SAFETY: UI submission is complete, image is CopySource and all native owners are live.
                 unsafe {
                     present.display(renderer.gpu().context(), image, size)?;
                 }
+                present_ms = present_at.elapsed().as_secs_f64() * 1000.;
+                presented = true;
                 let graph_present = graph_start.map(|start| start.elapsed().as_secs_f64() * 1000.);
                 if work.paint_nodes > 0 || work.layout_passes > 0 || shell.version != last_ui {
                     if focused_float.is_none() {
@@ -653,7 +819,8 @@ pub fn run(options: Options) -> ara_ui::Result<()> {
                 float.dirty = false;
             }
             if let Ok(task) = editor.captures.try_recv() {
-                let prepared = capture::prepare(&task, &mut renderer, &mut gpu, &shell, &editor);
+                let prepared =
+                    capture::prepare(&task, &mut renderer, &mut gpu, &shell, &editor, &scene_view);
                 let completed = editor.completed.clone();
                 match prepared {
                     Ok(work) => {
@@ -701,7 +868,39 @@ pub fn run(options: Options) -> ara_ui::Result<()> {
                     )
                     .map_err(String::from)?;
             }
+            if let Some(probe) = &mut probe {
+                let sample = responsiveness::Sample {
+                    cpu_ms: frame_start.elapsed().as_secs_f64() * 1000.,
+                    inject_ms,
+                    input_ms,
+                    ui_ms,
+                    tick_ms,
+                    geometry_ms,
+                    view_ms,
+                    extract_ms: stages.extract_ms,
+                    upload_ms: stages.upload_ms,
+                    patched: stages.patched,
+                    native: stages.native,
+                    scene_ms,
+                    icons_ms,
+                    render_ms,
+                    gpu_ms: gpu.take_gpu_wait().as_secs_f64() * 1000.,
+                    present_ms,
+                    presented,
+                    game_frame,
+                    ..Default::default()
+                };
+                probe.end(&editor, &mut shell, sample);
+            }
             frames += 1;
+            if probe.as_ref().is_some_and(responsiveness::Probe::finished) {
+                let device = serde_json::to_value(&renderer.gpu().context().info)?;
+                if let Some(probe) = &probe {
+                    probe.write(&device)?;
+                }
+                game.close(&mut editor, &mut gpu)?;
+                break;
+            }
             if options.frames.is_some_and(|limit| frames >= limit)
                 || verification
                     .as_ref()
@@ -712,7 +911,9 @@ pub fn run(options: Options) -> ara_ui::Result<()> {
                 || ux_verification.as_ref().is_some_and(|v| {
                     v.finished() && idle_samples.len() >= 1500 && camera_samples.len() >= 240
                 })
+                || journey.as_ref().is_some_and(journey::Journey::finished)
             {
+                game.close(&mut editor, &mut gpu)?;
                 break;
             }
             if let Some(remaining) = frame_budget.checked_sub(frame_start.elapsed()) {
@@ -727,6 +928,9 @@ pub fn run(options: Options) -> ara_ui::Result<()> {
         }
         if ux_verification.as_ref().is_some_and(|v| !v.finished()) {
             return Err("UX verification did not finish".into());
+        }
+        if journey.as_ref().is_some_and(|v| !v.finished()) {
+            return Err("the journey route did not finish".into());
         }
         editor.host.flush();
         if options.screenshot {
@@ -757,6 +961,68 @@ pub fn run(options: Options) -> ara_ui::Result<()> {
     floats.destroy(&renderer);
     result
 }
+/// Exercise the editor's document extraction and production renderer without SDL.
+fn headless(options: Options) -> ara_ui::Result<()> {
+    std::fs::create_dir_all(&options.output)?;
+    let mut editor = Editor::open_with(
+        &options.project,
+        Some(crate::settings::user_settings_path()?),
+    )?;
+    setup::prepare(&mut editor, &options)?;
+    // Headless has no editor tick loop to publish completed imports. This capture
+    // job owns one asset-ready boundary; SceneView itself remains read-only.
+    // The editor owner can fold this block into its shared asset-ready boundary.
+    let _published_assets = ara_play_host::PublishedAssets::for_project(editor.host.root())
+        .map_err(anyhow::Error::msg)?;
+    let worker = ara_play_host::PlayConfig::for_project(editor.host.root()).import_worker;
+    ara_play_host::package_scene_with_progress(editor.host.root(), &worker, |progress| {
+        eprintln!(
+            "Scene capture cooking: {}/{} complete ({:.1}s elapsed, {:.1}s since completion)",
+            progress.completed,
+            progress.total,
+            progress.elapsed.as_secs_f64(),
+            progress.stalled.as_secs_f64()
+        );
+        Ok(())
+    })
+    .map_err(anyhow::Error::msg)?;
+    let view = editor.view()?;
+    let create_renderer =
+        if crate::world::gltf::render_settings(editor.host.store().workspace())?.ray_tracing {
+            Renderer::new
+        } else {
+            Renderer::new_raster
+        };
+    let mut renderer = create_renderer(
+        view.scene(editor.host.root(), &editor.state, None, &mut editor.models)?,
+        options.size,
+        &[],
+        editor.host.root().join(".ara/gpu"),
+    )?;
+    detect_quality(&mut editor, &renderer);
+    let mut scene_view = viewport::SceneView::default();
+    scene_view.render(&mut renderer, &editor, &view, 64)?;
+    scene_view
+        .capture(
+            &mut renderer,
+            &CaptureRequest {
+                camera: editor.state.camera.spec(),
+                size: options.size,
+                mode: ViewMode::Lit,
+                deterministic: true,
+                exposure: 0.0015,
+                settle_frames: 4,
+                tick: 0,
+                seed: 0,
+                marks: Some(16),
+            },
+        )?
+        .write(&options.output.join("editor-scene.png"))?;
+    scene_view.destroy(&mut renderer)?;
+    editor.host.flush();
+    renderer.gpu().assert_clean()?;
+    Ok(())
+}
 fn extent_scaled(rect: ara_ui::paint::Box2, dpi: f32) -> [u32; 2] {
     [
         (rect.w * dpi).round().max(1.) as u32,
@@ -785,9 +1051,6 @@ fn attach(gpu: &mut NativeUi, renderer: &Renderer) -> anyhow::Result<()> {
         )?;
     }
     Ok(())
-}
-fn review_tints(editor: &Editor) -> std::collections::BTreeMap<u64, &'static str> {
-    editor.review_tints()
 }
 
 fn statistics(samples: &[f64]) -> Value {
@@ -832,10 +1095,13 @@ fn route_event(
     controller: &mut controller::Controller,
     editor: &mut Editor,
     shell: &mut Shell,
-    renderer: &Renderer,
+    renderer: &mut Renderer,
     view: &crate::world::DocumentView,
     clipboard: &mut OsClipboard,
 ) -> ara_ui::Result<(bool, bool, bool)> {
+    if let Some(handled) = game_input(&event, editor, shell, dpi) {
+        return Ok((handled, false, false));
+    }
     // Tab drags follow the desktop pointer: preview in whichever window is under it.
     if shell.dragged_tab().is_some() {
         match &event {
@@ -847,6 +1113,12 @@ fn route_event(
                 }
                 return Ok((true, false, false));
             }
+            // A tab pressed but not yet dragged (no drop preview: under 6 px of
+            // movement) is an ordinary click: its release goes to the controller.
+            Event::MouseButton {
+                button: 1,
+                pressed: false,
+            } if !shell.tab_dragging() => shell.drag = None,
             Event::MouseButton {
                 button: 1,
                 pressed: false,
@@ -1035,4 +1307,77 @@ fn import_file(editor: &mut Editor, source: &std::path::Path) -> ara_ui::Result<
     }
     editor.action("editor.asset.import", json!({"path": relative}))?;
     Ok(())
+}
+/// While the Game view holds the keyboard and mouse, raw input goes to the shown Play
+/// client (the player maps it exactly like its own window). Esc, or pressing outside
+/// the view, gives them back; F5-F8 (Play, Pause, Step, Stop) stay with the editor.
+/// `None` lets the editor handle the event; `Some(redraw)` consumed it.
+fn game_input(event: &Event, editor: &mut Editor, shell: &mut Shell, dpi: f32) -> Option<bool> {
+    use ara_play_host::embed::DeviceEvent;
+    if !shell.game_captured {
+        return None;
+    }
+    let release = |editor: &mut Editor, shell: &mut Shell| {
+        shell.game_captured = false;
+        if let (Some(world), Some(surfaces)) = (&editor.play_world, &editor.play_surfaces) {
+            surfaces.device(world, shell.game_client, vec![DeviceEvent::FocusLost]);
+        }
+        let _ = shell.rebuild(editor);
+    };
+    let events = match *event {
+        Event::Key {
+            scancode: 41,
+            pressed: true,
+            ..
+        } => {
+            release(editor, shell);
+            return Some(true);
+        }
+        // F5-F8: the editor's Play controls.
+        Event::Key {
+            scancode: 62..=65, ..
+        } => return None,
+        Event::Key { repeat: true, .. } => return Some(false),
+        Event::Key {
+            scancode, pressed, ..
+        } => vec![DeviceEvent::Key {
+            scancode,
+            down: pressed,
+        }],
+        Event::MouseButton { button, pressed } => {
+            let inside = shell.ui.find("game-frame").is_some_and(|i| {
+                shell.ui.nodes[i]
+                    .rect
+                    .contains(shell.pointer[0], shell.pointer[1])
+            });
+            if pressed && !inside {
+                release(editor, shell);
+                return None;
+            }
+            vec![DeviceEvent::MouseButton {
+                button,
+                down: pressed,
+            }]
+        }
+        Event::MouseMotion { position, delta } => {
+            shell.pointer = [position[0] / dpi, position[1] / dpi];
+            vec![DeviceEvent::MouseMotion {
+                dx: delta[0],
+                dy: delta[1],
+            }]
+        }
+        _ => return None,
+    };
+    if let (Some(world), Some(surfaces)) = (&editor.play_world, &editor.play_surfaces) {
+        surfaces.device(world, shell.game_client, events);
+    }
+    Some(false)
+}
+
+/// The GPU's automatic preset: what Auto (and an Auto project default) resolve to in
+/// the Scene view's menus, status bar and `quality` gating.
+fn detect_quality(editor: &mut Editor, renderer: &Renderer) {
+    use ara_render_fidelity::presets::{Capabilities, QualityPreset};
+    editor.state.detected_quality = Some(QualityPreset::detect(&Capabilities::of(renderer.gpu())));
+    editor.state.apply_settings();
 }

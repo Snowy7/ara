@@ -11,13 +11,14 @@ use ara_gpu::{
 };
 use ara_render::graph::State;
 use glam::{Mat4, Vec3};
-use std::{collections::BTreeMap, path::Path};
+use std::collections::BTreeMap;
 
 /// An offscreen fidelity view. The host owns the device and invokes render at frame
 /// boundaries. Resources and temporal histories belong to this view alone.
 pub struct FidelityView {
     pub(crate) settings: Settings,
     pub(crate) shader_revision: String,
+    pub(crate) shader_epoch: u64,
     pub(crate) scene: GpuScene,
     pub(crate) targets: Targets,
     pub(crate) pipelines: BTreeMap<&'static str, Pipeline>,
@@ -44,6 +45,8 @@ pub struct FidelityView {
     pub(crate) slot: usize,
     pub(crate) samples: u32,
     pub(crate) gather_events: u32,
+    pub(crate) bounded_reservoirs: bool,
+    pub(crate) deferred_post: bool,
     pub(crate) atmosphere: Option<crate::atmosphere::Atmosphere>,
     pub(crate) atmosphere_dirty: bool,
     pub(crate) texture_bias: f32,
@@ -51,6 +54,8 @@ pub struct FidelityView {
     pub(crate) timings: Vec<PassTiming>,
     pub(crate) reservoirs: Option<crate::resampling::Reservoirs>,
     pub(crate) shadow_source: crate::SunShadowSource,
+    /// The uploaded frame of the last completed render, replayed by `post_process`.
+    pub(crate) last_frame: Option<crate::frame::GpuFrame>,
 }
 impl FidelityView {
     /// Upload immutable extraction, prewarm cooked pipelines and allocate view storage.
@@ -71,6 +76,36 @@ impl FidelityView {
             "Raster/Mobile require baked probes"
         );
         let scene = GpuScene::new(gpu, scene, settings.tier == Tier::Rt)?;
+        Self::from_scene(gpu, scene, settings, baked)
+    }
+    /// Present a native compressed, instanced scene through the same fidelity
+    /// transport, post processing and temporal reconstruction as legacy captures.
+    pub fn new_native(
+        gpu: &mut VulkanDevice,
+        scene: &ara_render::instanced::Scene,
+        textures: ara_texture_stream::NativeResidency,
+        settings: Settings,
+        baked: Option<&BakedProbes>,
+    ) -> Result<Self> {
+        settings.validate()?;
+        ensure!(
+            settings.tier != Tier::Rt || gpu.context().info.ray_tracing,
+            "RT tier unavailable"
+        );
+        ensure!(
+            settings.tier == Tier::Rt || baked.is_some(),
+            "Raster/Mobile require baked probes"
+        );
+        let scene = GpuScene::new_native(gpu, scene, textures, settings.tier == Tier::Rt)?;
+        Self::from_scene(gpu, scene, settings, baked)
+    }
+
+    fn from_scene(
+        gpu: &mut VulkanDevice,
+        scene: GpuScene,
+        settings: Settings,
+        baked: Option<&BakedProbes>,
+    ) -> Result<Self> {
         let volume = if let Some(b) = baked {
             b.validate(scene.content_hash())?;
             b.volume
@@ -129,32 +164,13 @@ impl FidelityView {
             include_bytes!("../shaders/sheen-albedo.bin"),
         )?;
         let sheen_index = gpu.sampled_image(sheen_lut, false)?.index;
-        let artifacts = Path::new(env!("CARGO_MANIFEST_DIR")).join("cooked");
+        let artifacts = ara_gpu::cooked::resource_dir(
+            env!("CARGO_PKG_NAME"),
+            concat!(env!("CARGO_MANIFEST_DIR"), "/cooked"),
+        );
         let mut pipelines = BTreeMap::new();
-        let names = if settings.tier == Tier::Rt {
-            vec![
-                "primary",
-                "ddgi",
-                "hybrid",
-                "reference",
-                "primary_emissive",
-                "ddgi_emissive",
-                "hybrid_emissive",
-                "reference_emissive",
-                "primary_atmosphere",
-                "ddgi_atmosphere",
-                "hybrid_atmosphere",
-                "reference_atmosphere",
-                "primary_layers",
-                "ddgi_layers",
-                "hybrid_layers",
-                "reference_layers",
-            ]
-        } else {
-            vec!["primary_raster", "hybrid_raster"]
-        };
         let mut cohort = None;
-        for name in names.into_iter().chain([
+        for name in [
             "temporal",
             "atrous",
             "bloom",
@@ -171,7 +187,7 @@ impl FidelityView {
             } else {
                 "fog_raster"
             },
-        ]) {
+        ] {
             let cooked: ara_gpu::cooked::CookedPipeline =
                 serde_json::from_slice(&std::fs::read(artifacts.join(format!("{name}.json")))?)?;
             if let Some(key) = &cohort {
@@ -188,6 +204,7 @@ impl FidelityView {
         Ok(Self {
             settings,
             shader_revision: cohort.expect("Every view loads cooked pipelines"),
+            shader_epoch: gpu.shader_epoch(),
             scene,
             targets: Targets::new(
                 gpu,
@@ -219,6 +236,8 @@ impl FidelityView {
             slot: 0,
             samples: 0,
             gather_events: 2,
+            bounded_reservoirs: false,
+            deferred_post: false,
             atmosphere: None,
             atmosphere_dirty: true,
             texture_bias: 0.,
@@ -226,6 +245,7 @@ impl FidelityView {
             timings: Vec::new(),
             reservoirs: None,
             shadow_source: crate::SunShadowSource::RayQueries,
+            last_frame: None,
         })
     }
     /// Bound traced secondary surfaces before the DDGI terminal. One event is
@@ -241,6 +261,24 @@ impl FidelityView {
             self.history = false;
         }
         Ok(())
+    }
+    /// Leave bloom, lens/tone mapping, temporal upscale and display output to
+    /// `post_process`, which the caller then runs every frame over feature-composited
+    /// radiance (live views with particles). Without it those passes ran twice per
+    /// frame. Exposure is still metered in `render`. Off by default.
+    pub fn set_deferred_post(&mut self, deferred: bool) {
+        self.deferred_post = deferred;
+    }
+    /// Bounded reservoir budgets: secondary paths (GI candidates, glossy and layered
+    /// samples) end in the DDGI terminal after the gather events instead of
+    /// reference-length paths (eleven events with roulette), and glossy specular is
+    /// traced at half rate on a checkerboard. Off by default; presets below Epic
+    /// enable it. Changing it resets accumulated transport.
+    pub fn set_bounded_reservoirs(&mut self, bounded: bool) {
+        if self.bounded_reservoirs != bounded {
+            self.bounded_reservoirs = bounded;
+            self.history = false;
+        }
     }
     /// Trace one incident sample per two or four pixels each frame. Rotating phases
     /// cover every pixel; invalid history always receives a fresh repair sample.
@@ -265,6 +303,24 @@ impl FidelityView {
         scene: &ara_render::scene::Scene,
     ) -> Result<()> {
         self.scene.update(gpu, scene)
+    }
+    /// Updates native poses/materials/lights at a completed frame boundary,
+    /// retaining shared geometry and previous successfully presented transforms.
+    /// New geometry or texture generations require a prepared replacement view.
+    pub fn update_native_scene(
+        &mut self,
+        gpu: &mut VulkanDevice,
+        scene: &ara_render::instanced::Scene,
+    ) -> Result<crate::scene::NativeUpdate> {
+        let update = self.scene.update_native(gpu, scene)?;
+        if update.lighting {
+            self.responsive_frames = 7;
+        }
+        if update.changed && matches!(self.settings.mode, Mode::Reference { .. }) {
+            self.history = false;
+            self.samples = 0;
+        }
+        Ok(update)
     }
     /// Change ray-query visibility while retaining cached mesh acceleration.
     pub fn set_instance_masks(
@@ -332,6 +388,7 @@ impl FidelityView {
         }
         self.settings = settings;
         self.shadow_source = crate::SunShadowSource::RayQueries;
+        self.atmosphere_dirty = true;
         self.history = false;
         self.samples = 0;
         gpu.collect()?;
@@ -413,7 +470,7 @@ impl FidelityView {
             data,
         })
     }
-    fn read_buffer(
+    pub(crate) fn read_buffer(
         &self,
         gpu: &mut VulkanDevice,
         source: Buffer,

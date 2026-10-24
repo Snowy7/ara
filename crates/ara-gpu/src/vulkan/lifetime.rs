@@ -58,6 +58,7 @@ impl Device for VulkanDevice {
         }
     }
     fn wait(&self, point: TimelinePoint) -> Result<()> {
+        crate::cpu_scope!("GPU.timeline_wait");
         if point.value > self.submitted[point.queue.index()] {
             return Err(GpuError::Contract(
                 "Cannot wait on an unsubmitted timeline point".into(),
@@ -101,6 +102,7 @@ impl Device for VulkanDevice {
         Ok(())
     }
     fn collect(&mut self) -> Result<()> {
+        crate::cpu_scope!("GPU.collect_retired");
         let done = self.completed()?;
         let mut index = 0;
         while index < self.retired.len() {
@@ -135,6 +137,8 @@ impl Device for VulkanDevice {
 
 impl Drop for VulkanDevice {
     fn drop(&mut self) {
+        // Join the compiler and destroy unpublished replacements before layout/device teardown.
+        drop(self.shader_worker.take());
         // SAFETY: Last owner. Idle covers descriptors, pipelines, queries and command buffers.
         unsafe {
             let _ = self.context.device.device_wait_idle();

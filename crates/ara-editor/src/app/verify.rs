@@ -7,6 +7,8 @@ pub(super) struct Verification {
     entity: Option<String>,
     txn: Option<String>,
     captures: Vec<String>,
+    /// Scene viewport captures of the typed-draft check: before, draft, committed.
+    scene: Vec<image::RgbaImage>,
     samples: Vec<Value>,
     started: Instant,
 }
@@ -18,6 +20,7 @@ impl Verification {
             entity: None,
             txn: None,
             captures: Vec::new(),
+            scene: Vec::new(),
             samples: Vec::new(),
             started: Instant::now(),
         }
@@ -32,6 +35,7 @@ impl Verification {
         gpu: &mut NativeUi,
         ui_renderer: &mut UiRenderer,
         renderer: &mut Renderer,
+        scene_view: &mut super::viewport::SceneView,
     ) -> ara_ui::Result<bool> {
         if self.finished() {
             return Ok(false);
@@ -59,7 +63,13 @@ impl Verification {
                     return Err("hierarchy did not select the expected entity".into());
                 }
             }
-            2 => {
+            // A typed draft previews in the Scene before it commits. Over three frames
+            // (the loop projects drafts and applies commits between steps): capture,
+            // type; capture the draft, commit; capture the commit. The draft frame
+            // matches the committed one, and the crate moved from the first.
+            2 if self.scene.is_empty() => {
+                let before = self.scene_image(editor, shell, gpu, renderer, scene_view)?;
+                self.scene.push(before);
                 let id = "edit-Transform-position-0";
                 // Engine components (MeshRenderer) can push Transform below the fold.
                 shell.reveal_field("Transform.position.x")?;
@@ -70,8 +80,18 @@ impl Verification {
                     &mut clipboard,
                 )?;
                 shell.dispatch(editor)?;
+                return Ok(true);
+            }
+            2 if self.scene.len() == 1 => {
+                let draft = self.scene_image(editor, shell, gpu, renderer, scene_view)?;
+                self.scene.push(draft);
                 shell.commit_fields(editor)?;
                 check_x(editor, self.entity.as_deref(), 1.5)?;
+                return Ok(true);
+            }
+            2 => {
+                let committed = self.scene_image(editor, shell, gpu, renderer, scene_view)?;
+                self.draft_preview(committed)?;
             }
             3 => {
                 let before = editor.host.store().history().len();
@@ -122,8 +142,16 @@ impl Verification {
                 if shell.ui.find(&format!("turn-{txn}")).is_none() {
                     return Err("Agents panel did not show the MCP turn".into());
                 }
-                self.screenshot("agents-review", editor, shell, gpu, ui_renderer, renderer)?;
-                shell.click(&format!("revert-{txn}"), &mut clipboard)?;
+                self.screenshot(
+                    "agents-review",
+                    editor,
+                    shell,
+                    gpu,
+                    ui_renderer,
+                    renderer,
+                    scene_view,
+                )?;
+                shell.click(&format!("turn-{txn}-undo"), &mut clipboard)?;
                 shell.dispatch(editor)?;
                 check_x(editor, self.entity.as_deref(), 1.5)?;
             }
@@ -141,12 +169,28 @@ impl Verification {
                 shell.rebuild(editor)?;
             }
             8 => {
-                self.screenshot("ara-dark", editor, shell, gpu, ui_renderer, renderer)?;
+                self.screenshot(
+                    "ara-dark",
+                    editor,
+                    shell,
+                    gpu,
+                    ui_renderer,
+                    renderer,
+                    scene_view,
+                )?;
                 editor.action("editor.theme", json!({"light":true}))?;
                 shell.rebuild(editor)?;
             }
             9 => {
-                self.screenshot("ara-light", editor, shell, gpu, ui_renderer, renderer)?;
+                self.screenshot(
+                    "ara-light",
+                    editor,
+                    shell,
+                    gpu,
+                    ui_renderer,
+                    renderer,
+                    scene_view,
+                )?;
                 editor.action("editor.theme", json!({"light":false}))?;
                 shell.rebuild(editor)?;
             }
@@ -156,10 +200,26 @@ impl Verification {
                 editor.action("editor.palette", json!({"open":true}))?;
                 editor.action("editor.search", json!({"panel":"palette","query":"fr"}))?;
                 shell.rebuild(editor)?;
-                self.screenshot("palette-dark", editor, shell, gpu, ui_renderer, renderer)?;
+                self.screenshot(
+                    "palette-dark",
+                    editor,
+                    shell,
+                    gpu,
+                    ui_renderer,
+                    renderer,
+                    scene_view,
+                )?;
                 editor.action("editor.theme", json!({"light":true}))?;
                 shell.rebuild(editor)?;
-                self.screenshot("palette-light", editor, shell, gpu, ui_renderer, renderer)?;
+                self.screenshot(
+                    "palette-light",
+                    editor,
+                    shell,
+                    gpu,
+                    ui_renderer,
+                    renderer,
+                    scene_view,
+                )?;
                 editor.action("editor.theme", json!({"light":false}))?;
                 editor.action("editor.palette", json!({"open":false}))?;
                 shell.rebuild(editor)?;
@@ -202,10 +262,19 @@ impl Verification {
                 }
             }
             13 => {
+                // The warnings and errors the run left (the status bar counts them).
+                let problems = editor.action(
+                    "logs",
+                    json!({"group": false, "limit": 500, "since": 0, "severity": "warning"}),
+                )?;
+                std::fs::write(
+                    self.output.join("problems.json"),
+                    ara_json::to_canonical_string(&problems),
+                )?;
                 std::fs::write(
                     self.output.join("interactions.json"),
                     ara_json::to_canonical_string(
-                        &json!({"verified":true,"steps":self.samples,"totalMs":self.started.elapsed().as_secs_f64()*1000.,"flow":["hierarchy selection","unit-aware inspector position","coalesced simulated gizmo","keyboard undo","agent batch via generated MCP","Agents panel turn","Revert via UI button","Escape cancels gesture","MCP viewport/editor/layout capture jobs completed"]}),
+                        &json!({"verified":true,"steps":self.samples,"totalMs":self.started.elapsed().as_secs_f64()*1000.,"flow":["hierarchy selection","unit-aware inspector position","typed draft previews in the Scene","coalesced simulated gizmo","keyboard undo","agent batch via generated MCP","Agents panel turn","Revert via UI button","Escape cancels gesture","MCP viewport/editor/layout capture jobs completed"]}),
                     ),
                 )?;
             }
@@ -216,23 +285,24 @@ impl Verification {
         self.step += 1;
         Ok(true)
     }
-    pub(super) fn screenshot(
+    /// The Scene viewport as a reproducible capture, showing what the live view shows
+    /// (a typed draft's projection included).
+    fn scene_image(
         &self,
-        name: &str,
         editor: &mut Editor,
         shell: &mut Shell,
         gpu: &mut NativeUi,
-        ui_renderer: &mut UiRenderer,
         renderer: &mut Renderer,
-    ) -> ara_ui::Result<()> {
-        shell.settle_transitions();
+        scene_view: &mut super::viewport::SceneView,
+    ) -> ara_ui::Result<image::RgbaImage> {
         shell.frame()?;
-        let mut scene_view = super::viewport::SceneView::default();
         let view = editor.view()?;
-        renderer.update_geometry(view.scene(editor.host.root(), &editor.state, None)?)?;
-        if let Some(rect) = shell.viewport() {
-            renderer.resize(extent_scaled(rect, gpu.dpi()))?;
-            let capture = renderer.capture(&CaptureRequest {
+        let rect = shell.viewport().ok_or("the Scene viewport is not shown")?;
+        renderer.resize(extent_scaled(rect, gpu.dpi()))?;
+        scene_view.render_capture(renderer, editor, &view, 64)?;
+        let capture = scene_view.capture(
+            renderer,
+            &CaptureRequest {
                 camera: editor.state.camera.spec(),
                 size: renderer.size(),
                 mode: ViewMode::Lit,
@@ -241,15 +311,102 @@ impl Verification {
                 settle_frames: 1,
                 tick: 0,
                 seed: 7,
-                marks: Some(100),
-            })?;
+                marks: None,
+            },
+        )?;
+        scene_view.attach(gpu, renderer, editor.state.quality)?;
+        Ok(capture.image)
+    }
+    /// Check the typed-draft captures (before, draft, then `committed`) and keep them
+    /// as evidence: the draft must show what the commit shows, unlike the frame before.
+    fn draft_preview(&mut self, committed: image::RgbaImage) -> ara_ui::Result<()> {
+        let [before, draft] = std::mem::take(&mut self.scene)
+            .try_into()
+            .map_err(|_| "the typed-draft check needs two captures")?;
+        std::fs::create_dir_all(&self.output)?;
+        for (name, image) in [
+            ("before", &before),
+            ("draft", &draft),
+            ("committed", &committed),
+        ] {
+            image.save(self.output.join(format!("viewport-{name}.png")))?;
+        }
+        let same = ara_render::capture::compare(&committed, &draft, DRAFT_TOLERANCE)?;
+        let moved = ara_render::capture::compare(&committed, &before, DRAFT_TOLERANCE)?;
+        std::fs::write(
+            self.output.join("draft-preview.json"),
+            ara_json::to_canonical_string(
+                &json!({"draftVsCommitted":same.score,"beforeVsCommitted":moved.score,"tolerance":DRAFT_TOLERANCE}),
+            ),
+        )?;
+        if !same.passed {
+            return Err(format!(
+                "the typed draft's Scene differs from its commit (1-SSIM {})",
+                same.score
+            )
+            .into());
+        }
+        if moved.passed {
+            return Err(format!(
+                "the Scene did not change with the edit (1-SSIM {})",
+                moved.score
+            )
+            .into());
+        }
+        Ok(())
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn screenshot(
+        &self,
+        name: &str,
+        editor: &mut Editor,
+        shell: &mut Shell,
+        gpu: &mut NativeUi,
+        ui_renderer: &mut UiRenderer,
+        renderer: &mut Renderer,
+        scene_view: &mut super::viewport::SceneView,
+    ) -> ara_ui::Result<()> {
+        // Pending saves land first and the shell rebuilds after them, so captures
+        // show a settled save state (the status bar, the unsaved-scene dot): a save
+        // that finished since the last rebuild still reads "Saving…" until then.
+        editor.host.flush();
+        shell.rebuild(editor)?;
+        shell.settle_transitions();
+        shell.frame()?;
+        let view = editor.view()?;
+        // A native Scene extracts its own content; the legacy renderer takes the
+        // committed scene, without the gesture.
+        if !super::scene_sync::native(editor, renderer) {
+            renderer.update_geometry(view.scene(
+                editor.host.root(),
+                &editor.state,
+                None,
+                &mut editor.models,
+            )?)?;
+        }
+        if let Some(rect) = shell.viewport() {
+            renderer.resize(extent_scaled(rect, gpu.dpi()))?;
+            scene_view.render_capture(renderer, editor, &view, 64)?;
+            let capture = scene_view.capture(
+                renderer,
+                &CaptureRequest {
+                    camera: editor.state.camera.spec(),
+                    size: renderer.size(),
+                    mode: ViewMode::Lit,
+                    deterministic: true,
+                    exposure: 0.0015,
+                    settle_frames: 1,
+                    tick: 0,
+                    seed: 7,
+                    marks: Some(100),
+                },
+            )?;
             if name == "ara-dark" {
                 std::fs::create_dir_all(&self.output)?;
                 capture.write(&self.output.join("viewport.png"))?;
             }
-            scene_view.render(renderer, editor, &view, 64)?;
             scene_view.attach(gpu, renderer, editor.state.quality)?;
-            let changed = review_tints(editor);
+            let changed = editor.agent_tints();
             gpu.overlays(
                 rect,
                 overlay::ENTITY_IMAGE,
@@ -263,7 +420,7 @@ impl Verification {
                 )?,
             );
         }
-        crate::shell::icons::install(ui_renderer, editor.state.light, gpu.dpi())?;
+        crate::shell::icons::install(ui_renderer, gpu.dpi())?;
         ui_renderer.render(
             gpu,
             &shell.ui.display,
@@ -278,13 +435,14 @@ impl Verification {
             self.output.join(format!("{name}.layout.json")),
             ara_json::to_canonical_string(&shell.layout_report()),
         )?;
-        // Restore live images before releasing the temporary fidelity capture target.
-        super::attach(gpu, renderer)?;
+        // The capture settled the live view; retain that same completed attachment.
+        scene_view.attach(gpu, renderer, editor.state.quality)?;
         gpu.overlays(Default::default(), overlay::ENTITY_IMAGE, Vec::new());
-        scene_view.destroy(renderer)?;
         Ok(())
     }
 }
+/// The 1-SSIM within which two Scene captures count as the same image.
+const DRAFT_TOLERANCE: f64 = 0.005;
 fn check_x(editor: &Editor, entity: Option<&str>, expected: f32) -> ara_ui::Result<()> {
     let resolved = crate::world::resolve(editor.host.store(), &editor.state.doc)
         .map_err(|d| format!("{d:?}"))?;

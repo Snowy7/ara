@@ -2,10 +2,16 @@
 //! daemon or the editor) into a pre-spawned, single-use pool. It initializes, connects
 //! back over localhost WebSocket with the session token and idles at zero CPU until
 //! `play.start` assigns a role and a shared-memory snapshot; then it runs that world
-//! (windowed through SDL3, or headless) and exits on `play.stop`.
+//! (windowed through SDL3, embedded in the owner through a shared GPU surface after
+//! `play.embed`, or headless) and exits on `play.stop`.
+extern crate glam34 as glam;
 mod crash;
 mod device;
+mod embed;
+mod input;
 mod net;
+mod packed;
+mod standalone;
 mod world;
 
 use anyhow::{Context, Result, anyhow};
@@ -16,7 +22,7 @@ use ara_play::{
     shm::Section,
 };
 use ara_runtime::extract::RenderFrame;
-use ara_runtime_render::{Presenter, two_d::Presenter2d};
+use ara_runtime_render::{Presenter, QualityChoice, RenderOptions, two_d::Presenter2d};
 use clap::Parser;
 use serde_json::{Value, json};
 use std::{
@@ -27,14 +33,11 @@ use world::{PendingPatch, World};
 
 /// Command line. The session token comes from `ARA_PLAY_TOKEN`, never an argument.
 #[derive(Parser)]
-#[command(
-    name = "ara-player",
-    about = "Ara play process (spawned by the edit-world owner)"
-)]
+#[command(name = "ara-player", about = "Ara game player and editor Play process")]
 struct Args {
     /// Owner's live-link port on 127.0.0.1.
     #[arg(long)]
-    owner: u16,
+    owner: Option<u16>,
     /// Pool slot name, for logs and window titles.
     #[arg(long, default_value = "player")]
     name: String,
@@ -45,13 +48,51 @@ struct Args {
     #[arg(long, default_value = "1280x720")]
     size: String,
     /// Persistent pipeline-cache directory.
-    #[arg(long, default_value = ".ara/gpu")]
+    #[arg(long, default_value_os_t = default_gpu_cache())]
     gpu_cache: PathBuf,
+    /// Override project quality: auto, low, medium, high or epic.
+    #[arg(long)]
+    quality: Option<QualityChoice>,
+    /// Experimental hardware ray tracing; omit to use the project setting.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    ray_tracing: Option<bool>,
+    #[command(flatten)]
+    standalone: standalone::Options,
 }
 
 fn main() {
+    let launched = Instant::now();
+    match ara_crash::monitor_from_args() {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("ara-player crash monitor: {error:#}");
+            std::process::exit(2);
+        }
+    }
     crash::install();
-    if let Err(error) = run(Args::parse()) {
+    #[cfg(feature = "tracy")]
+    let _tracy = ara_gpu::__tracy::Client::start();
+    let directory = std::env::var_os("ARA_CRASH_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(".ara/crashes"));
+    let build_id = std::env::var("ARA_BUILD_ID")
+        .ok()
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|path| std::fs::read(path).ok())
+                .map(|bytes| format!("ara-player-{}", ara_sim::StateHash::of_bytes(&bytes)))
+        })
+        .unwrap_or_else(|| concat!("ara-player-", env!("CARGO_PKG_VERSION")).into());
+    let _capture = match ara_crash::Capture::start(&directory, &build_id) {
+        Ok(capture) => Some(capture),
+        Err(error) => {
+            eprintln!("ARA-EXP-CRASH-004: {error:#}");
+            None
+        }
+    };
+    if let Err(error) = run(Args::parse(), launched) {
         eprintln!("ara-player: {error:#}");
         std::process::exit(2);
     }
@@ -60,6 +101,20 @@ fn main() {
 fn parse_size(text: &str) -> Result<[u32; 2]> {
     let (w, h) = text.split_once('x').context("size must be WIDTHxHEIGHT")?;
     Ok([w.parse()?, h.parse()?])
+}
+
+/// Standalone launches cache driver pipelines outside the current working folder.
+/// Pools still pass their explicit cache; tests inherit their isolated config root.
+fn default_gpu_cache() -> PathBuf {
+    if let Some(root) = std::env::var_os("ARA_CONFIG_DIR") {
+        return PathBuf::from(root).join("gpu");
+    }
+    for variable in ["LOCALAPPDATA", "XDG_CACHE_HOME"] {
+        if let Some(root) = std::env::var_os(variable) {
+            return PathBuf::from(root).join("Ara/gpu");
+        }
+    }
+    std::env::temp_dir().join("ara-player-gpu")
 }
 
 /// Frames the live audio device keeps queued (43 ms at 48 kHz): a hardware period plus
@@ -72,17 +127,20 @@ const INVALID_PARAMS: i64 = -32602;
 const METHOD_NOT_FOUND: i64 = -32601;
 
 struct Player {
+    quality: QualityChoice,
+    render_options: RenderOptions,
     link: Link,
     args: Args,
     size: [u32; 2],
     window: Option<device::Windowed>,
+    /// Embedded players: the shared ring lives on the presenter's device, so this
+    /// field is declared (and dropped) before `presenter`.
+    embed: Option<embed::Embedded>,
     presenter: Option<Presenter>,
     presenter2d: Option<Presenter2d>,
+    window2d: Option<Presenter2d>,
     /// Live audio of windowed players: the world's presenter and the SDL device.
-    audio: Option<(
-        ara_runtime_audio::AudioPresenter,
-        ara_audio::device::SdlBackend,
-    )>,
+    audio: Option<(world::Audio, ara_audio::device::SdlBackend)>,
     frame: RenderFrame,
     world: Option<World>,
     /// Keeps the snapshot section mapped for the session (diff baselines, restarts).
@@ -90,21 +148,59 @@ struct Player {
     last_status: Instant,
     last_advance: Instant,
     max_late: Duration,
+    /// Whether the world's first windowed frame (the full scene upload) was presented.
+    uploaded: bool,
     stop: bool,
+    /// Scene-dependent landscape/VFX pipelines warm on the first window frame.
+    window_ready: bool,
+    prewarmed: Option<(
+        ara_runtime_script::ScriptPlugin,
+        std::sync::mpsc::Receiver<ara_runtime_script::ScriptEvent>,
+    )>,
 }
 
-fn run(args: Args) -> Result<()> {
-    let init = Instant::now();
+fn run(args: Args, launched: Instant) -> Result<()> {
+    ara_gpu::cpu_scope!("Player.run");
+    if args.owner.is_none() {
+        return standalone::run(args, launched);
+    }
+    let init = launched;
     let size = parse_size(&args.size)?;
     let token = std::env::var(TOKEN_ENV).context("ARA_PLAY_TOKEN is not set")?;
+    let prewarmed = match std::env::var("ARA_PLAY_SCRIPTS") {
+        Ok(text) => {
+            let scripts: ara_play::ScriptScene = serde_json::from_str(&text)?;
+            let config = match scripts.host {
+                ara_play::ScriptHost::Development => {
+                    ara_runtime_script::ScriptHostConfig::Development(
+                        ara_runtime_script::ScriptSettings {
+                            host_dir: scripts.host_dir.into(),
+                            compile_server: scripts.compile_server.map(Into::into),
+                            modules: scripts.modules.into_iter().map(Into::into).collect(),
+                        },
+                    )
+                }
+                ara_play::ScriptHost::NativeAot { manifest } => {
+                    ara_runtime_script::ScriptHostConfig::NativeAot {
+                        manifest: manifest.into(),
+                    }
+                }
+            };
+            Some(ara_runtime_script::ScriptPlugin::prewarm(config).context(
+                "ARA0922: C# pre-warm failed; run `ara doctor` to check the .NET 10 installation",
+            )?)
+        }
+        Err(_) => None,
+    };
     // Windowed pool players create the window, device and pipelines before Play.
     let (window, presenter) = if args.window {
-        let (window, presenter) = device::Windowed::open(&args.name, size, &args.gpu_cache)?;
+        let (window, presenter) = device::Windowed::open(&args.name, size, &args.gpu_cache, args.quality.unwrap_or_default(), RenderOptions { ray_tracing: args.ray_tracing.unwrap_or(false) })
+            .context("ARA_GPU_BACKEND: cannot open the player renderer; run `ara doctor` and check the Vulkan loader, Vulkan 1.3 GPU/driver, and validation layers")?;
         (Some(window), Some(presenter))
     } else {
         (None, None)
     };
-    let mut link = Link::connect(args.owner)?;
+    let mut link = Link::connect(args.owner.context("Play requires an owner port")?)?;
     let hello = Hello {
         token,
         protocol: PROTOCOL.into(),
@@ -118,12 +214,18 @@ fn run(args: Args) -> Result<()> {
         Err(e) => return Err(anyhow!("owner refused hello: {e}")),
     }
     let mut player = Player {
+        quality: args.quality.unwrap_or_default(),
+        render_options: RenderOptions {
+            ray_tracing: args.ray_tracing.unwrap_or(false),
+        },
         link,
         args,
         size,
         window,
+        embed: None,
         presenter,
         presenter2d: None,
+        window2d: None,
         audio: None,
         frame: RenderFrame::default(),
         world: None,
@@ -131,7 +233,10 @@ fn run(args: Args) -> Result<()> {
         last_status: Instant::now(),
         last_advance: Instant::now(),
         max_late: Duration::ZERO,
+        uploaded: false,
         stop: false,
+        window_ready: false,
+        prewarmed,
     };
     player.run()
 }
@@ -161,25 +266,47 @@ impl Player {
         if let (Some(window), Some(presenter)) = (&mut self.window, &self.presenter) {
             window.shutdown(presenter)?;
         }
+        if let (Some(window), Some(presenter)) = (&mut self.window, &self.window2d) {
+            window.shutdown_2d(presenter)?;
+        }
+        // The shared ring goes before its device.
+        self.embed = None;
         self.link.flush()?;
         Ok(())
     }
 
     /// One loop iteration with a world: tick by host time, ack patches, heartbeat,
-    /// present (windowed) or sleep until the next tick is due (headless).
+    /// present (windowed), publish a shared frame (embedded, when due and a slot is
+    /// free) or sleep until the next tick is due (headless).
     fn frame(&mut self) -> Result<()> {
+        ara_gpu::cpu_scope!("Player.frame");
+        let warming_window = self.window.is_some() && !self.window_ready;
+        if warming_window {
+            busy(&mut self.link, "first window frame")?;
+        }
         let now = Instant::now();
         let elapsed = now - self.last_advance;
         self.last_advance = now;
+        if let (Some(embed), Some(presenter)) = (&mut self.embed, &mut self.presenter)
+            && let Some(desc) = embed.apply_pending(presenter)?
+        {
+            self.link.notify(embed::method::SURFACE, &desc)?;
+            self.link.flush()?;
+        }
         if let Some(world) = &mut self.world {
-            if let Some(window) = &mut self.window {
-                let (quit, inputs) = window.events(world.runtime.player())?;
-                self.stop |= quit;
-                if !inputs.is_empty()
-                    && let Err(e) = world.runtime.input(0, inputs)
-                {
-                    eprintln!("ara-player: input: {e:#}");
+            let inputs = match (&mut self.window, &mut self.embed) {
+                (Some(window), _) => {
+                    let (quit, inputs) = window.events(world.runtime.player())?;
+                    self.stop |= quit;
+                    inputs
                 }
+                (None, Some(embed)) => embed.input.injections(world.runtime.player()),
+                (None, None) => Vec::new(),
+            };
+            if !inputs.is_empty()
+                && let Err(e) = world.runtime.input(0, inputs)
+            {
+                eprintln!("ara-player: input: {e:#}");
             }
             let period = Duration::from_secs_f64(1.0 / f64::from(world.runtime.hz()));
             match world.runtime.advance(elapsed) {
@@ -208,13 +335,36 @@ impl Player {
                 let result = serde_json::to_value(world.patched(patch.tick, &patch.sets))?;
                 self.link.respond(patch.id, Ok(result))?;
             }
-            if self.window.is_some() {
+            // Windowed players present every iteration (vsync paces them), embedded
+            // ones when a frame is due (their frame cap), headless ones never.
+            let present = self.window.is_some() || self.embed.as_ref().is_some_and(|e| e.due(now));
+            if !present {
+                return self.after_frame(warming_window);
+            }
+            {
+                ara_gpu::cpu_scope!("Player.extract");
                 world.runtime.extract(&mut self.frame);
+            }
+            if let (Some(window), Some(presenter)) = (&mut self.window, &mut self.window2d) {
+                let tick = world.runtime.tick();
+                window.prepare_2d(
+                    presenter,
+                    world.runtime.play_mut().session_mut().world_mut(),
+                    tick,
+                )?;
             }
             let inputs = match &self.audio {
                 Some(_) => Some(world.audio_inputs()?),
                 None => None,
             };
+            // The first presented frame uploads the whole scene (texture decodes, mesh
+            // buffers): seconds with real content, so the owner's watchdog is told
+            // (windowed and embedded alike: owner calls such as `play.commands` arrive
+            // mid-upload).
+            if !self.uploaded {
+                busy(&mut self.link, "upload")?;
+                self.uploaded = true;
+            }
             // Acoustics and voice updates read the simulation only (physics is not
             // stepping between ticks): a worker runs them while the GPU frame presents.
             let listener = world::listener(&self.frame);
@@ -226,17 +376,38 @@ impl Player {
                     ),
                     _ => None,
                 };
-                let presented = match (&mut self.window, &mut self.presenter) {
-                    (Some(window), Some(presenter)) => window.present(presenter, &self.frame),
-                    _ => Ok(()),
+                let presented = match (
+                    &mut self.window,
+                    &mut self.window2d,
+                    &mut self.embed,
+                    &mut self.presenter,
+                ) {
+                    (Some(window), Some(presenter), _, _) => {
+                        window.present_2d(presenter).map(|()| None)
+                    }
+                    (Some(window), None, _, Some(presenter)) => window
+                        .present(presenter, &self.frame, || {
+                            world.fidelity_content(&self.frame)
+                        })
+                        .map(|()| None),
+                    (None, _, Some(embed), Some(presenter)) => {
+                        embed.render(presenter, &self.frame, || {
+                            world.fidelity_content(&self.frame)
+                        })
+                    }
+                    _ => Ok(None),
                 };
                 let audio = job.map(|job| {
+                    ara_gpu::cpu_scope!("Player.audio.join");
                     job.join()
                         .unwrap_or_else(|_| Err(anyhow!("audio worker panicked")))
                 });
                 (presented, audio)
             });
-            presented?;
+            if let Some(ready) = presented? {
+                self.link.notify(embed::method::FRAME, ready)?;
+                self.link.flush()?;
+            }
             let mut audio_failed = audio.and_then(Result::err);
             if audio_failed.is_none()
                 && let Some((audio, device)) = &mut self.audio
@@ -248,6 +419,27 @@ impl Player {
                 eprintln!("ara-player: audio off: {error:#}");
                 self.audio = None;
             }
+        }
+        self.after_frame(warming_window)
+    }
+
+    /// The end of every loop iteration with a world: the first-window-frame notice,
+    /// C# events, the heartbeat and, without a vsync-paced window, a short sleep.
+    fn after_frame(&mut self, warming_window: bool) -> Result<()> {
+        #[cfg(feature = "tracy")]
+        if let Some(client) = ara_gpu::__tracy::Client::running() {
+            client.frame_mark();
+        }
+        if warming_window {
+            self.window_ready = true;
+            self.link.notify(
+                ara_play::BUSY,
+                &ara_play::Busy {
+                    what: "first window frame complete".into(),
+                    max_ms: 0,
+                },
+            )?;
+            self.link.flush()?;
         }
         self.events()?;
         if self.last_status.elapsed() >= Duration::from_millis(250) {
@@ -270,10 +462,11 @@ impl Player {
     }
 
     fn status(&mut self) -> Result<()> {
-        let (fps, frame_ms_p95) = self
-            .window
-            .as_mut()
-            .map_or((0.0, 0.0), device::Windowed::take_stats);
+        let (fps, frame_ms_p95) = match (&mut self.window, &mut self.embed) {
+            (Some(window), _) => window.take_stats(),
+            (None, Some(embed)) => embed.take_stats(),
+            (None, None) => (0.0, 0.0),
+        };
         let status = match &mut self.world {
             Some(world) => Status {
                 tick: world.runtime.tick(),
@@ -305,8 +498,10 @@ impl Player {
     }
 
     fn handle(&mut self, message: Message) -> Result<()> {
-        let Message::Request { id, method, params } = message else {
-            return Ok(());
+        let (id, method, params) = match message {
+            Message::Request { id, method, params } => (id, method, params),
+            Message::Notification { method, params } => return self.notification(&method, params),
+            Message::Response { .. } => return Ok(()),
         };
         if method == method::PATCH {
             return self.patch(id, params);
@@ -382,8 +577,77 @@ impl Player {
                 let crash: ara_play::Crash = parse(params)?;
                 crash::trigger(&crash.kind)
             }
+            embed::method::EMBED => {
+                let params: embed::EmbedParams = parse(params)?;
+                Ok(serde_json::to_value(self.open_surface(&params)?)?)
+            }
+            embed::method::RESIZE => {
+                let params: embed::ResizeParams = parse(params)?;
+                let (Some(embed), Some(presenter)) = (&mut self.embed, &mut self.presenter) else {
+                    return Err(not_embedded());
+                };
+                let desc = embed.resize(presenter, [params.width, params.height])?;
+                Ok(serde_json::to_value(desc)?)
+            }
+            embed::method::DEVICE => {
+                let params: embed::DeviceParams = parse(params)?;
+                let embed = self.embed.as_mut().ok_or_else(not_embedded)?;
+                for event in &params.events {
+                    embed.input.apply(*event);
+                }
+                Ok(json!({"accepted": params.events.len()}))
+            }
             _ => self.world_method(method, params),
         }
+    }
+
+    /// Owner notifications: slot releases, raw input and asynchronous resizes of
+    /// embedded players. Bad params are logged; there is no one to answer.
+    fn notification(&mut self, method: &str, params: Value) -> Result<()> {
+        let Some(embed) = &mut self.embed else {
+            return Ok(());
+        };
+        let applied = match method {
+            embed::method::RELEASE => serde_json::from_value(params)
+                .map(|frame| embed.release(frame))
+                .map_err(anyhow::Error::from),
+            embed::method::DEVICE => serde_json::from_value::<embed::DeviceParams>(params)
+                .map(|p| p.events.into_iter().for_each(|e| embed.input.apply(e)))
+                .map_err(anyhow::Error::from),
+            embed::method::RESIZE => serde_json::from_value::<embed::ResizeParams>(params)
+                .map_err(anyhow::Error::from)
+                .and_then(|p| embed.request_resize([p.width, p.height])),
+            _ => Ok(()),
+        };
+        if let Err(error) = applied {
+            eprintln!("ara-player: {method}: {error:#}");
+        }
+        Ok(())
+    }
+
+    /// `play.embed`: no window; render at the owner's size into a shared ring.
+    /// Creates the GPU device (announced to the watchdog) before `play.start`.
+    fn open_surface(
+        &mut self,
+        params: &embed::EmbedParams,
+    ) -> Result<ara_gpu::shared::SurfaceDesc> {
+        anyhow::ensure!(
+            self.window.is_none(),
+            "windowed players present to their own window and cannot embed"
+        );
+        anyhow::ensure!(self.embed.is_none(), "this player is already embedded");
+        busy(&mut self.link, "gpu")?;
+        let (embedded, presenter) = embed::Embedded::open(
+            params,
+            &self.args.gpu_cache,
+            self.quality,
+            self.render_options,
+        )?;
+        let desc = embedded.desc();
+        self.size = [params.width, params.height];
+        self.presenter = Some(presenter);
+        self.embed = Some(embedded);
+        Ok(desc)
     }
 
     fn world_method(&mut self, method: &str, params: Value) -> std::result::Result<Value, Failure> {
@@ -480,8 +744,10 @@ impl Player {
                 }
                 if params.path.is_some() && self.presenter.is_none() {
                     // Headless players create a GPU device on their first image.
-                    self.presenter =
-                        Some(Presenter::new(self.size, Vec::new(), &self.args.gpu_cache));
+                    let mut presenter = Presenter::new(self.size, Vec::new(), &self.args.gpu_cache);
+                    presenter.set_quality(self.quality);
+                    presenter.set_render_options(self.render_options);
+                    self.presenter = Some(presenter);
                 }
                 let presenter2d = self
                     .presenter2d
@@ -551,11 +817,25 @@ impl Player {
             }
         };
         let decode_ms = decode.elapsed().as_secs_f64() * 1000.0;
+        self.quality = self
+            .args
+            .quality
+            .unwrap_or_else(|| scene.rendering.quality.into());
+        self.render_options = RenderOptions {
+            ray_tracing: self.args.ray_tracing.unwrap_or(scene.rendering.ray_tracing),
+        };
+        if let Some(presenter) = &mut self.presenter {
+            presenter.set_quality(self.quality);
+            presenter.set_render_options(self.render_options);
+        }
+        // Windowed and embedded players present live frames (and stream live).
+        let presenting = self.window.is_some() || self.embed.is_some();
         let (mut world, build_ms) = World::build(
             &scene,
             start.role,
             start.net.as_ref(),
-            self.window.is_some(),
+            presenting,
+            self.prewarmed.take(),
         )?;
         let mut handshake = None;
         if start.role == ara_play::Role::Client {
@@ -567,7 +847,24 @@ impl Player {
             world.resume(resume)?;
         }
         if self.window.is_some() {
-            // Live sound for windowed play; a missing device leaves play silent.
+            let source = world.asset_source()?;
+            let tick = world.runtime.tick();
+            let simulation = world.runtime.play_mut().session_mut().world_mut();
+            if ara_runtime_render::two_d::camera(simulation).is_some() {
+                let mut presenter = Presenter2d::new(&self.args.gpu_cache);
+                presenter.set_atlases(ara_runtime_render::two_d::atlases(
+                    simulation,
+                    source.as_ref(),
+                )?);
+                if let Some(window) = &mut self.window {
+                    window.prepare_2d(&mut presenter, simulation, tick)?;
+                }
+                self.window2d = Some(presenter);
+            }
+        }
+        if presenting {
+            // Live sound for windowed and embedded play; a missing device leaves play
+            // silent.
             let device = ara_audio::device::SdlBackend::open(48_000)
                 .map_err(anyhow::Error::from)
                 .and_then(|device| Ok((world.audio_presenter()?, device)));
@@ -577,6 +874,14 @@ impl Player {
             }
         }
         let mut started = world.start(start.start_paused, decode_ms + build_ms)?;
+        for diagnostic in world.runtime.asset_diagnostics() {
+            self.link.notify(
+                ara_play::EVENT,
+                &ara_play::Event::Diagnostic {
+                    diagnostic: serde_json::to_value(diagnostic)?,
+                },
+            )?;
+        }
         started.net_handshake_ms = handshake;
         self.last_advance = Instant::now();
         self.world = Some(world);
@@ -613,6 +918,12 @@ impl<E: Into<anyhow::Error>> From<E> for Failure {
 
 fn no_world() -> Failure {
     Failure::Engine(anyhow!("no world: send play.start first"))
+}
+
+fn not_embedded() -> Failure {
+    Failure::Engine(anyhow!(
+        "this player is not embedded: send play.embed first"
+    ))
 }
 
 fn parse<T: serde::de::DeserializeOwned>(params: Value) -> std::result::Result<T, Failure> {

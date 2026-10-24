@@ -195,7 +195,7 @@ impl Controller {
         event: Event,
         editor: &mut Editor,
         shell: &mut Shell,
-        renderer: &Renderer,
+        renderer: &mut Renderer,
         view: &crate::world::DocumentView,
         clipboard: &mut dyn ara_ui_text::Clipboard,
     ) -> ara_ui::Result<(bool, bool, bool)> {
@@ -333,9 +333,9 @@ impl Controller {
                     } else {
                         None
                     };
+                    // Handle highlights are UI overlays: a redraw, not a Scene frame.
                     if hover != self.hover {
                         self.hover = hover;
-                        scene_dirty = true;
                     }
                     shell.event(InputEvent::PointerMove(position), clipboard)?;
                     shell.hover_tooltip()?;
@@ -368,8 +368,13 @@ impl Controller {
                     shell.commit_fields(editor)?;
                     shell.input.blur(&mut shell.ui);
                 }
-                if pressed && shell.menu.is_some() && !shell.menu_contains(shell.pointer) {
-                    // A click outside an open menu closes it; menu titles reopen their own.
+                if pressed
+                    && shell.menu.is_some()
+                    && !shell.menu_contains(shell.pointer)
+                    && !shell.over_open_title()
+                {
+                    // A click outside an open menu closes it; another title opens its
+                    // own, and the open menu's title closes it when released.
                     shell.menu = None;
                     shell.rebuild(editor)?;
                     dirty = true;

@@ -36,6 +36,8 @@ pub struct Player {
     pub grace: Instant,
     /// `play.event` notifications (C# reloads, diagnostics, restarts) not yet drained.
     pub events: Vec<ara_play::Event>,
+    /// Embedded players' surface and frame notices not yet drained.
+    pub embed: Vec<crate::embed::Notice>,
 }
 
 impl Drop for Player {
@@ -62,6 +64,17 @@ impl Player {
                 && let Ok(event) = serde_json::from_value(params.clone())
             {
                 self.events.push(event);
+            } else if method == crate::embed::method::FRAME
+                && let Ok(ready) = serde_json::from_value(params.clone())
+            {
+                self.embed.push(crate::embed::Notice::Frame {
+                    ready,
+                    received_at_us: ara_gpu::shared::now_us(),
+                });
+            } else if method == crate::embed::method::SURFACE
+                && let Ok(desc) = serde_json::from_value(params.clone())
+            {
+                self.embed.push(crate::embed::Notice::Surface(desc));
             }
         }
     }
@@ -236,11 +249,33 @@ pub struct Pool {
     spawning: Vec<Spawning>,
     idle: Vec<Player>,
     next: u32,
+    scripts: Option<ara_play::ScriptScene>,
+    rendering: ara_play::RenderSettings,
 }
 
 impl Pool {
     /// Binds the live-link listener on 127.0.0.1 and starts filling the pool.
     pub fn new(config: PoolConfig, token: String) -> std::io::Result<Self> {
+        Self::with_scripts(config, token, None)
+    }
+
+    /// Warms project modules in each single-use player before its ready handshake.
+    pub fn with_scripts(
+        config: PoolConfig,
+        token: String,
+        scripts: Option<ara_play::ScriptScene>,
+    ) -> std::io::Result<Self> {
+        Self::with_rendering(config, token, scripts, Default::default())
+    }
+
+    /// Select the logical-device policy before windowed/embedded GPU warm-up.
+    /// Changing this setting requires a newly opened pool/device.
+    pub fn with_rendering(
+        config: PoolConfig,
+        token: String,
+        scripts: Option<ara_play::ScriptScene>,
+        rendering: ara_play::RenderSettings,
+    ) -> std::io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         listener.set_nonblocking(true)?;
         std::fs::create_dir_all(&config.logs)?;
@@ -251,6 +286,8 @@ impl Pool {
             spawning: Vec::new(),
             idle: Vec::new(),
             next: 0,
+            scripts,
+            rendering,
         };
         pool.refill();
         Ok(pool)
@@ -305,11 +342,16 @@ impl Pool {
             .arg("--size")
             .arg(format!("{}x{}", self.config.size[0], self.config.size[1]))
             .env(TOKEN_ENV, &self.token)
+            .env("ARA_CRASH_DIR", self.config.logs.join("crashes"))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::from(std::fs::File::create(&log)?));
         if window {
             command.arg("--window");
+        }
+        command.arg(format!("--ray-tracing={}", self.rendering.ray_tracing));
+        if let Some(scripts) = &self.scripts {
+            command.env("ARA_PLAY_SCRIPTS", serde_json::to_string(scripts)?);
         }
         #[cfg(windows)]
         {
@@ -423,6 +465,7 @@ impl Pool {
             status: None,
             grace: Instant::now(),
             events: Vec::new(),
+            embed: Vec::new(),
         })
     }
 
@@ -435,8 +478,12 @@ impl Pool {
         timeout: Duration,
     ) -> Result<Vec<Player>, String> {
         let start = Instant::now();
+        let mut problems = Vec::new();
         loop {
-            let problems = self.poll();
+            let observed = self.poll();
+            if !observed.is_empty() {
+                problems = observed;
+            }
             if self.ready(window) >= count {
                 break;
             }

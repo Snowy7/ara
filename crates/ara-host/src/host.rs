@@ -44,9 +44,13 @@ pub const RESERVED: [(&str, &str); 4] = [
 pub struct HostConfig {
     /// Quiet time after the last edit before a document is written to disk.
     pub debounce: Duration,
-    /// How often loaded files are checked for external edits.
+    /// How often loaded files are checked for external edits when OS change
+    /// notifications are unavailable (with them, a full check runs every 30 s as a
+    /// safety net). Checks run on the host's file thread; zero instead checks every
+    /// file synchronously on each `tick` (tests).
     pub watch_every: Duration,
-    /// How often the project is scanned for new document files.
+    /// How often the project is scanned for new document files when OS change
+    /// notifications are unavailable.
     pub scan_every: Duration,
     /// Seed for host IDs (sessions, checkpoints, jobs) and the store; entropy if `None`.
     pub seed: Option<u64>,
@@ -80,7 +84,6 @@ pub(crate) struct State {
     pub(crate) name: String,
     /// The project's main scene (path), the default document of calls naming none.
     pub(crate) main: Option<String>,
-    pub(crate) type_files: Vec<(PathBuf, Option<std::time::SystemTime>)>,
     pub(crate) store: Store,
     pub(crate) registry: Registry,
     pub(crate) proto: SchemaDb,
@@ -119,7 +122,6 @@ pub(crate) struct State {
     pub(crate) approval: Box<dyn Approval>,
     pub(crate) debounce: Duration,
     pub(crate) watch_every: Duration,
-    pub(crate) scan_every: Duration,
     pub(crate) stop: bool,
     killed: bool,
     ops: Receiver<Transaction>,
@@ -162,7 +164,35 @@ impl Host {
         let state_dir = project.root.join(STATE_DIR);
         fs::create_dir_all(&state_dir).map_err(|e| io_error("create", &state_dir, e))?;
         let lock = lock(&state_dir)?;
-        let (ws, per_file) = project.load(&[]);
+        let (mut ws, per_file) = project.load(&[]);
+        // Canonical import sidecars are editable documents too. Source-only legacy
+        // identity stubs remain index entries until explicitly initialized.
+        if project.db.kind("import").is_some() {
+            for (id, path) in project.index.imports() {
+                let sidecar = format!("{path}.import.json");
+                if let Ok(text) = fs::read_to_string(project.root.join(&sidecar)) {
+                    let result = ara_doc::read(&text, &sidecar, &project.db, Some(&project.index));
+                    if let Some(doc) = result
+                        .doc
+                        .filter(|d| d.kind == "import" && d.id.as_str() == id)
+                    {
+                        ws.insert_with_asset_path(sidecar, doc, path);
+                    }
+                }
+            }
+        }
+        let marker = fs::read_to_string(project.root.join(crate::project::MARKER))
+            .map_err(|e| io_error("read", &project.root.join(crate::project::MARKER), e))?;
+        let settings =
+            crate::project_settings::read(&marker, crate::project::MARKER, &project.db, None);
+        let settings = settings.doc.ok_or_else(|| {
+            settings
+                .diags
+                .into_iter()
+                .next()
+                .expect("invalid settings has a diagnostic")
+        })?;
+        ws.insert(crate::project::MARKER, settings);
         let name = project.name();
         let main = project.main_scene();
         let Project {
@@ -189,13 +219,29 @@ impl Host {
         for d in diags.into_iter().chain(per_file.into_values().flatten()) {
             diag.push(d, Meta::default());
         }
-        let mut files = Files::default();
+        let type_files = type_files
+            .into_iter()
+            .map(|p| {
+                let m = fs::metadata(&p).and_then(|m| m.modified()).ok();
+                (p, m)
+            })
+            .collect();
+        let io = crate::file_io::FileThread::start(
+            root.clone(),
+            db.clone(),
+            type_files,
+            config.watch_every,
+            config.scan_every,
+        )
+        .map_err(|e| io_error("start the file thread for", &root, e))?;
+        let mut files = Files::new(io);
         for (path, doc) in ws.docs() {
             let abs = root.join(path);
             if let Ok(text) = fs::read_to_string(&abs) {
+                files.io.track(path.to_owned(), crate::file_io::stamp(&abs));
                 files.synced.insert(
                     doc.id.clone(),
-                    Synced::new(path.to_owned(), text, doc.clone(), &abs),
+                    Synced::new(path.to_owned(), text, doc.clone()),
                 );
             }
         }
@@ -210,13 +256,6 @@ impl Host {
             diag.push(d, Meta::default());
         }
         let ops = store.subscribe();
-        let type_files = type_files
-            .into_iter()
-            .map(|p| {
-                let m = fs::metadata(&p).and_then(|m| m.modified()).ok();
-                (p, m)
-            })
-            .collect();
         let mut st = State {
             profiler: ara_profile::Profiler::new(ara_profile::Config::default())
                 .map_err(|e| Diagnostic::error(codes::INVALID_PARAMS, e))?,
@@ -224,7 +263,6 @@ impl Host {
             root,
             name,
             main,
-            type_files,
             store,
             registry,
             proto: SchemaDb::new(),
@@ -251,13 +289,13 @@ impl Host {
             approval: config.approval,
             debounce: config.debounce,
             watch_every: config.watch_every,
-            scan_every: config.scan_every,
             stop: false,
             killed: false,
             ops,
             _lock: lock,
         };
         st.recover(&entries);
+        st.refresh_project_settings();
         st.collab_open(config.seed);
         st.collab.hub.set_overwrite_window(
             config
@@ -477,9 +515,10 @@ impl Host {
         &mut self.st.profiler
     }
 
-    /// Whether any document has changes not yet written (they save after a short debounce).
+    /// Whether any document has changes not yet written: waiting for the short
+    /// debounce, or being written on the file thread.
     pub fn unsaved(&self) -> bool {
-        !self.st.files.changed.is_empty()
+        !self.st.files.changed.is_empty() || self.st.files.io.pending() > 0
     }
 
     /// Writes every document with unsaved changes now.
@@ -704,7 +743,18 @@ impl State {
             let now = Instant::now();
             for op in &txn.ops {
                 self.files.changed.insert(op.doc().clone(), now);
+                if let ara_doc::Op::Document {
+                    doc, path, kind, ..
+                } = op
+                {
+                    if kind.is_none() {
+                        self.files.deleted.insert(doc.clone(), path.clone());
+                    } else {
+                        self.files.deleted.remove(doc);
+                    }
+                }
             }
+            self.refresh_project_settings();
             self.track_review(&txn);
             let summary = self.txn_summary(&txn);
             self.notify(Topic::History, summary);
@@ -719,10 +769,10 @@ impl State {
                 self.review.set(target, None, ReviewStatus::Reverted);
             }
             Some(target) => {
-                // Undoing an undo (redo) brings the original change back for review.
+                // Redo restores the original immediate acceptance as well as its ops.
                 let original = self.store.txn(target).and_then(|t| t.reverts.clone());
                 if let Some(original) = original.filter(|o| self.review.is_tracked(o)) {
-                    self.review.set(&original, None, ReviewStatus::Applied);
+                    self.review.set(&original, None, ReviewStatus::Accepted);
                 }
             }
             None if matches!(txn.author, Author::Agent(_)) && !self.untracked => {
@@ -783,6 +833,25 @@ impl State {
             on_disk.insert(id.clone(), rev);
         }
         let (mut replayed, mut stopped, mut skipped) = (0usize, false, BTreeSet::new());
+        for entry in entries {
+            if let Entry::Txn { txn, .. } = entry {
+                for op in &txn.ops {
+                    if let ara_doc::Op::Document { doc, path, .. } = op
+                        && !self.root.join(path).exists()
+                    {
+                        let rev = flushes
+                            .get(doc.as_str())
+                            .and_then(|list| {
+                                list.iter()
+                                    .rev()
+                                    .find(|(_, hash)| *hash == journal::hash("deleted"))
+                            })
+                            .map_or(base, |(rev, _)| *rev);
+                        on_disk.entry(doc.clone()).or_insert(Some(rev));
+                    }
+                }
+            }
+        }
         for e in entries {
             match e {
                 Entry::Txn { session, txn } => {
@@ -797,7 +866,13 @@ impl State {
                             _ => None,
                         })
                         .collect();
-                    let apply = !needs.is_empty() && needs.iter().all(|n| *n == Some(true));
+                    let apply: BTreeSet<_> = txn
+                        .ops
+                        .iter()
+                        .zip(&needs)
+                        .filter(|(_, needed)| **needed == Some(true))
+                        .map(|(op, _)| op.doc().clone())
+                        .collect();
                     for op in &txn.ops {
                         if matches!(on_disk.get(op.doc()), Some(None))
                             && flushes
@@ -808,12 +883,22 @@ impl State {
                             skipped.insert(op.doc().clone());
                         }
                     }
-                    match self.store.restore(txn.clone(), apply) {
+                    match self.store.restore_documents(txn.clone(), &apply) {
                         Ok(()) => {
-                            if apply {
+                            if !apply.is_empty() {
                                 replayed += 1;
-                                for op in &txn.ops {
+                                for op in txn.ops.iter().filter(|op| apply.contains(op.doc())) {
                                     self.files.changed.insert(op.doc().clone(), Instant::now());
+                                    if let ara_doc::Op::Document {
+                                        doc, path, kind, ..
+                                    } = op
+                                    {
+                                        if kind.is_none() {
+                                            self.files.deleted.insert(doc.clone(), path.clone());
+                                        } else {
+                                            self.files.deleted.remove(doc);
+                                        }
+                                    }
                                 }
                             }
                             if let Some(s) = session {
@@ -849,9 +934,14 @@ impl State {
                     txn,
                     entity,
                     status,
-                } => self
-                    .review
-                    .set(&TxnId(txn.clone()), entity.as_deref(), *status),
+                } => self.review.set(
+                    &TxnId(txn.clone()),
+                    entity.as_deref(),
+                    match status {
+                        ReviewStatus::Applied => ReviewStatus::Accepted,
+                        status => *status,
+                    },
+                ),
                 Entry::Base { .. } | Entry::Flush { .. } => {}
             }
         }
@@ -895,7 +985,10 @@ impl State {
     /// Rewrites the journal once it grows past its bound. Only safe when every
     /// document is flushed, so their flush entries cover all dropped transactions.
     pub(crate) fn maybe_compact(&mut self) {
-        if self.journal.len() <= journal::MAX_ENTRIES || !self.files.changed.is_empty() {
+        if self.journal.len() <= journal::MAX_ENTRIES
+            || !self.files.changed.is_empty()
+            || self.files.io.pending() > 0
+        {
             return;
         }
         let result = self.journal.read_all().and_then(|entries| {

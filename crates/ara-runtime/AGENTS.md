@@ -16,7 +16,8 @@ renderer-neutral presentation extraction. No GPU, window or process code (see
   The engine world includes brains/perception (`Brain`, `Perceiver`, `Stimulus`) and
   the behaviour commands (`behavior.*`).
 - `Runtime::new(schema, workspace, scene, assets, RuntimeConfig, plugins)`: projects the
-  scene, loads every `MeshRenderer.model` generation, builds physics/nav/animation at
+  scene, preloads model generations reachable through its prefabs, streamed cells
+  and foliage rules, builds physics/nav/animation at
   tick 0 and returns **paused**. `step`, `step_until`, `advance(elapsed)` (bounded
   catch-up), `pause/resume/set_timescale`, `inject`, `patch_edits` (live edits →
   baseline-checked ops at the next tick), `changes()` (keep-changes diff),
@@ -46,8 +47,23 @@ renderer-neutral presentation extraction. No GPU, window or process code (see
   (`NavStreamer` assembled at the boundary, swaps recorded with their tick).
 - `assets`: `AssetSource` (published generations by `as_…` ID), `CachedAssets`
   (FileCache pinned by action digest), `MemoryAssets`, `Models`.
+  Optional `AssetSource::digest` reads immutable metadata without payload I/O;
+  `Models::load` reuses an unchanged decoded generation. New prefab references
+  prepare their reachable models at the live-edit control boundary before adoption.
+- Missing/broken model generations produce `asset_errors()` (`ARA7310`) and magenta
+  shape placeholders. Failed IDs remain eligible for a later hot-reload recovery.
 - `model::Model` decodes a glTF import generation (FORMAT.md v1); `skin::Skin` turns
   the cooked skeleton/clips into ara-anim data (parent-first reorder, `joint_map`).
+  ModelVertex retains UV0/UV1; ModelMaterial retains independent slot transforms,
+  emissive strength (folded once), transmission and occlusion factors/textures.
+  `Model::select` resolves source node names/indices and subtree-local primitives,
+  restoring the selected pivot while retaining rotation/scale. Geometry stays shared.
+  `MeshRenderer` emission defaults to the imported factor, with explicit enable,
+  strength, optional factor and material selectors; `Draw.emissive_factor` replaces
+  the source factor before `Draw.emissive` multiplies it once. Shape emission is radiance.
+  `MeshRenderer.material_overrides` resolves graph/instance assets into immutable
+  `material::MaterialAsset` data at content boundaries; `Draw.material` replaces one
+  subtree-local primitive slot. Texture generation metadata stays aligned with bytes.
 - `plugin::RuntimePlugin` (`Send + Sync`): seams for C# scripts (`ara-runtime-script`),
   networked play (`ara-runtime-net`), world streaming (`ara-runtime-world`), audio and
   VFX (`prepare(world, schema)` before projection, `register`, `install(Stage)`,
@@ -64,6 +80,9 @@ renderer-neutral presentation extraction. No GPU, window or process code (see
 - `extract::RenderFrame`: camera, sun, lights, environment, draws (shape or model
   primitive, interpolated world matrix) and skin-order palettes.
 - `control::default_actions()`: `Move`, `Look` (Axis2), `Jump`, `Sprint` + bindings.
+- `follow::FollowView::new(rig, target, walls)`: a follow rig's aim, view direction
+  and boom, which stops 0.25 m before static solid box colliders (`follow::Wall`).
+  `place_cameras` and the editor's opening view share it.
 
 ## System order
 
@@ -94,6 +113,9 @@ plugin Late → poses.resolve.
 - Physics: a body is teleported only when its `Transform` differs from what physics
   last wrote (`SyncedTransform`). Static bodies keep authored transforms. Kinematic
   nav agents lift their collider so it rests on the ground.
+  Model colliders share MeshRenderer's selectors and pivot, bake world scale, and
+  rebuild native handles on portable restore. Omitted/zero PhysicsIds receive stable
+  unique values before binding; automatic IDs are marked driven in keep-changes.
 - Navmeshes bake at load from static box colliders and terrain inside each
   `NavMeshSurface` (cached by tile content in `nav_cache`). `NavMeshSurface.geometry`
   assets are not baked yet (structured error). Streamed navigation needs terrain
@@ -103,6 +125,13 @@ plugin Late → poses.resolve.
 - Terrain: one `Terrain` per level; tiles evaluate on worker threads at load (strokes
   only; imported bases are not available in play yet). Chunk bodies are cooked Jolt
   heightfields, re-cooked after every native rebuild.
+  `TerrainData.foliage_rules` retains every rule (including disabled) with its stable
+  `fo_asset#r_rule` identity. Scatter hashes that identity and stamps the generation's
+  catalog index in `Instance.identity[3]`; inserting/enabling rules does not reseed survivors.
+  The Terrain entity's complete parent-resolved translation shifts the evaluated
+  grid, heights and foliage after stroke/exclusion evaluation; navigation and
+  collision consume that same world data. Rotation/scale must be baked into the
+  grid and diagnose if present. Chunk geometry already contains the world offset.
 - Animation: tick rate must divide 48 000. The move-state cycle is the mean of the
   locomotion clip lengths. Cubic glTF channels keep key values; morph channels are
   not animated. A reloaded model restarts its animators (old snapshots are rejected).

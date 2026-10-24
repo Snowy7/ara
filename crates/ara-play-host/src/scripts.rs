@@ -20,11 +20,13 @@ pub struct ScriptPaths {
 }
 
 impl ScriptPaths {
-    /// The build under `ARA_DOTNET_ARTIFACTS`, else the nearest `dotnet/artifacts/bin`
-    /// above `start` (a development checkout). `None` until `dotnet build` ran.
+    /// Installed .NET tools, then `ARA_DOTNET_ARTIFACTS`, then checkout artifacts.
     pub fn locate(start: &Path) -> Option<Self> {
-        let bin = std::env::var_os("ARA_DOTNET_ARTIFACTS")
-            .map(PathBuf::from)
+        let bin = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join("dotnet/artifacts/bin")))
+            .filter(|bin| bin.join("Ara.Host/release/Ara.Host.dll").is_file())
+            .or_else(|| std::env::var_os("ARA_DOTNET_ARTIFACTS").map(PathBuf::from))
             .or_else(|| {
                 start
                     .ancestors()
@@ -101,12 +103,13 @@ impl PlayService {
         let paths = self.config.scripts.as_ref().ok_or_else(|| {
             fail(
                 codes::REQUEST,
-                "the project has C# modules but the .NET host is not built \
+                "the project has C# modules but the .NET host is not built; run `ara doctor` \
                  (`dotnet build dotnet/Ara.slnx -c Release`, or set ARA_DOTNET_ARTIFACTS)",
             )
         })?;
         let text = |p: &Path| p.to_string_lossy().into_owned();
         Ok(Some(ScriptScene {
+            host: Default::default(),
             host_dir: text(&paths.host_dir),
             compile_server: paths.compile_server.as_deref().map(text),
             modules: modules.iter().map(|m| text(m)).collect(),
@@ -163,14 +166,32 @@ impl PlayService {
         Ok(json!({"path": p.path, "agent": agent, "claimedBy": claimed}))
     }
 
-    /// Drains player events into each world's buffer (logging diagnostics) and returns
-    /// the worlds whose players asked for an L4 restart.
+    /// Drains player events into each world's buffer (logging diagnostics and the
+    /// authority's successful reloads, so the Console and `ara logs` show them) and
+    /// returns the worlds whose players asked for an L4 restart.
     pub(crate) fn drain_events(&mut self, cx: &mut Cx<'_>) -> Vec<String> {
         let mut restarts = Vec::new();
         let mut reloaded = Vec::new();
         for (id, world) in &mut self.worlds {
-            for (_, player) in &mut world.players {
+            for (index, (_, player)) in world.players.iter_mut().enumerate() {
                 for event in std::mem::take(&mut player.events) {
+                    if let Event::Reload {
+                        tick,
+                        level,
+                        cascade,
+                        errors: 0,
+                        ..
+                    } = &event
+                        && index == 0
+                    {
+                        cx.log(Diagnostic::info(
+                            codes::PLAY,
+                            format!(
+                                "{id}: C# reloaded at tick {tick} (level {level}, {cascade} module{})",
+                                if *cascade == 1 { "" } else { "s" }
+                            ),
+                        ));
+                    }
                     match &event {
                         Event::Diagnostic { diagnostic } => {
                             if let Ok(d) = serde_json::from_value::<Diagnostic>(diagnostic.clone())
@@ -212,10 +233,12 @@ impl PlayService {
     }
 
     /// Publishes `world`s C# command catalog to the host (`schema.list` shows it next
-    /// to the registry commands; `play.command` runs them).
+    /// to the registry commands; `play.command` runs them). A player that faults
+    /// answering is logged (the world is marked faulted), never dropped silently.
     pub(crate) fn publish_commands(&mut self, cx: &mut Cx<'_>, world: &str) {
-        if let Ok(catalog) = self.call(world, method::COMMANDS, json!({}), false) {
-            cx.publish_commands("play", &catalog);
+        match self.call(world, method::COMMANDS, json!({}), false) {
+            Ok(catalog) => cx.publish_commands("play", &catalog),
+            Err(problems) => problems.into_iter().for_each(|d| cx.log(d)),
         }
     }
 

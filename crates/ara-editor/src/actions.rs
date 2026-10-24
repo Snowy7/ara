@@ -2,6 +2,7 @@
 use crate::state::{EditorState, Navigation, Tool, default_layout};
 use ara_diag::Diagnostic;
 use ara_host::{Cx, Method, Service, parse};
+use ara_render_fidelity::presets::QualityPreset;
 use ara_schema::{Schema, SchemaDb};
 use ara_ui::docking::{Axis, DockDrop, DockLayout, DockNode};
 use glam::Vec3;
@@ -83,10 +84,10 @@ impl Service for EditorService {
                 "Read editor selection, camera and layout.",
             )
             .read_only(),
-            Method::new::<SessionParams>(
+            Method::new::<EditorFrame>(
                 db,
                 "editor.frame",
-                "Frame the current selection, or the scene when empty.",
+                "Frame the selection, or the scene's content (not terrain or ground) when empty; `opening` shows the scene's opening view.",
             ),
             Method::new::<SessionParams>(
                 db,
@@ -103,7 +104,16 @@ impl Service for EditorService {
                 "editor.focus",
                 "Activate a panel and optionally reveal a schema field.",
             ),
-            Method::new::<EditorCamera>(db, "editor.camera", "Set the Scene view's orbit camera."),
+            Method::new::<EditorCamera>(
+                db,
+                "editor.camera",
+                "Read or set the Scene view camera: orbit pose and vertical field of view, or look through a scene Camera entity (`entity`). Returns `camera`.",
+            ),
+            Method::new::<EditorSceneOpen>(
+                db,
+                "editor.scene.open",
+                "Open a scene in the Scene view by project path (`levels/hangar.scene`) or document ID. A human's view switches (each scene keeps its camera; a first open frames the scene). An agent opens it in its own presence and the human gets a View/Follow notice; the human's view never moves by itself.",
+            ),
             Method::new::<EditorTheme>(
                 db,
                 "editor.theme",
@@ -228,6 +238,19 @@ impl Service for EditorService {
             .collect()
     }
     fn call(&mut self, cx: &mut Cx<'_>, method: &str, params: Value) -> R {
+        let result = self.dispatch(cx, method, params);
+        // Preferences that could not be written are warnings on the bus, not stderr.
+        for failure in self.settings.take_failures() {
+            cx.log(
+                Diagnostic::warning(crate::codes::SETTINGS, failure)
+                    .subject(ara_diag::Subject::system("editor")),
+            );
+        }
+        result
+    }
+}
+impl EditorService {
+    fn dispatch(&mut self, cx: &mut Cx<'_>, method: &str, params: Value) -> R {
         if method == "editor.state" {
             return Ok(json!({"state":self.navigation.state}));
         }
@@ -260,6 +283,15 @@ impl Service for EditorService {
                 target: &target,
                 clipboard_entities: false,
                 clipboard_value: false,
+                logs: crate::shell::LogView::default(),
+                assets_show_all: false,
+                game: (true, "free", false),
+                // The window's build job is not visible here; the project's state is.
+                build: crate::shell::commands::BuildState {
+                    running: false,
+                    built: false,
+                    profile: !crate::shell::build::presets(cx.root()).is_empty(),
+                },
             };
             return Ok(json!({"commands": export(&cx, &keymap(state))}));
         }
@@ -300,7 +332,25 @@ impl Service for EditorService {
         }
         if method == "editor.report" {
             let p: EditorReport = parse(params)?;
-            cx.log(crate::invalid(p.message));
+            let (code, warning) = match p.kind.as_deref().unwrap_or("action") {
+                "thumbnail" => (crate::codes::THUMBNAIL, true),
+                "missing" => (crate::codes::MISSING_SOURCE, true),
+                "settings" => (crate::codes::SETTINGS, true),
+                "transport" => (crate::codes::TRANSPORT, false),
+                "render" => (crate::codes::RENDER, false),
+                _ => (crate::codes::ACTION, false),
+            };
+            let diagnostic = if warning {
+                Diagnostic::warning(code, p.message)
+            } else {
+                Diagnostic::error(code, p.message)
+            };
+            let subject = p
+                .subject
+                .as_deref()
+                .and_then(ara_diag::Subject::parse)
+                .unwrap_or_else(|| ara_diag::Subject::system("editor"));
+            cx.log(diagnostic.subject(subject));
             return Ok(json!({"ok":true}));
         }
         if method == "editor.profile.freeze" {
@@ -319,8 +369,11 @@ impl Service for EditorService {
             matches!(s.author, ara_ops::Author::Agent(_))
                 .then(|| (s.id.clone(), s.author.to_string()))
         });
-        let separate =
-            agent.is_some() && matches!(method, "editor.select" | "editor.camera" | "editor.frame");
+        let separate = agent.is_some()
+            && matches!(
+                method,
+                "editor.select" | "editor.camera" | "editor.frame" | "editor.scene.open"
+            );
         let human = separate.then(|| (state.doc.clone(), state.selection.clone(), state.camera));
         if separate
             && let Some((id, _)) = &agent
@@ -419,7 +472,16 @@ impl Service for EditorService {
                         .set("appearance.reduceMotion", Some(json!(v)), author.clone())?;
                 }
                 if let Some(v) = p.quality {
-                    let quality = if v { "fidelity" } else { "raster" };
+                    let low = |c| state.resolve_quality(c) == Some(QualityPreset::Low);
+                    let quality = match (v, low(state.project_quality())) {
+                        (false, _) => "low",
+                        (true, false) => "project",
+                        (true, true) => "auto",
+                    };
+                    self.settings
+                        .set("viewport.quality", Some(json!(quality)), author.clone())?;
+                }
+                if let Some(quality) = p.render_quality {
                     self.settings
                         .set("viewport.quality", Some(json!(quality)), author)?;
                 }
@@ -627,9 +689,9 @@ impl Service for EditorService {
                         .store()
                         .workspace()
                         .find(&doc)
-                        .ok_or_else(|| vec![crate::invalid("document not found")])?;
-                    state.doc = d.to_string();
-                    state.selection.clear();
+                        .ok_or_else(|| vec![crate::invalid("document not found")])?
+                        .to_string();
+                    open_scene(&mut state, cx, d, agent.is_none())?;
                 }
                 let resolved = crate::world::resolve(cx.store(), &state.doc)?;
                 for entity in &p.entities {
@@ -658,45 +720,73 @@ impl Service for EditorService {
             }
             "editor.camera" => {
                 let p: EditorCamera = parse(params)?;
-                if !p.distance.is_finite()
-                    || p.distance <= 0.
-                    || !p.yaw.is_finite()
-                    || !p.pitch.is_finite()
-                    || p.target.iter().any(|x| !x.is_finite())
-                {
+                let numbers = p.target.into_iter().flatten().chain(
+                    [p.yaw, p.pitch, p.distance, p.fov_y_degrees]
+                        .into_iter()
+                        .flatten(),
+                );
+                if numbers.clone().any(|x| !x.is_finite()) || p.distance.is_some_and(|d| d <= 0.) {
                     return Err(vec![crate::invalid(
                         "camera values must be finite; distance must be positive",
                     )]);
                 }
-                state.camera = crate::state::Camera {
-                    target: p.target.into(),
-                    yaw: p.yaw,
-                    pitch: p.pitch.clamp(-1.54, 1.54),
-                    distance: p.distance.clamp(0.05, 100_000.),
-                };
+                if p.entity.is_none() && numbers.count() == 0 {
+                    return Ok(json!({"camera": state.camera}));
+                }
+                let camera = &mut state.camera;
+                if let Some(distance) = p.distance {
+                    camera.distance = distance.clamp(0.05, 100_000.);
+                }
+                if let Some(entity) = &p.entity {
+                    let (position, forward, fov) = scene_camera(cx, &state.doc, entity)?;
+                    camera.look_from(position, forward);
+                    camera.set_fov(fov);
+                }
+                if let Some(target) = p.target {
+                    camera.target = target.into();
+                }
+                if let Some(yaw) = p.yaw {
+                    camera.yaw = yaw;
+                }
+                if let Some(pitch) = p.pitch {
+                    camera.pitch = pitch.clamp(-1.54, 1.54);
+                }
+                if let Some(fov) = p.fov_y_degrees {
+                    camera.set_fov(fov);
+                }
             }
             "editor.frame" => {
-                let resolved = crate::world::resolve(cx.store(), &state.doc)?;
-                let transforms = crate::world::world_transforms(&resolved);
-                let mut min = Vec3::splat(f32::INFINITY);
-                let mut max = Vec3::splat(f32::NEG_INFINITY);
-                for (id, matrix) in transforms {
-                    if state.selection.is_empty() || state.selection.contains(&id) {
-                        for x in [-0.5, 0.5] {
-                            for y in [-0.5, 0.5] {
-                                for z in [-0.5, 0.5] {
-                                    let p = matrix.transform_point3(Vec3::new(x, y, z));
-                                    min = min.min(p);
-                                    max = max.max(p);
-                                }
-                            }
-                        }
-                    }
+                let p: EditorFrame = parse(params)?;
+                if p.opening == Some(true) {
+                    let resolved = crate::world::resolve(cx.store(), &state.doc)?;
+                    let transforms = crate::world::world_transforms(&resolved);
+                    state.camera = crate::view_camera::opening(&resolved, &transforms);
+                } else {
+                    frame(&mut state, cx)?;
                 }
-                if min.is_finite() {
-                    state.camera.target = (min + max) * 0.5;
-                    state.camera.distance = (max - min).length().max(1.) * 1.8;
+            }
+            "editor.scene.open" => {
+                let p: EditorSceneOpen = parse(params)?;
+                let workspace = cx.store().workspace();
+                let id = workspace
+                    .find(&p.scene)
+                    .ok_or_else(|| {
+                        vec![crate::invalid(format!(
+                            "no document `{}`; use a project path like `levels/main.scene`",
+                            p.scene
+                        ))]
+                    })?
+                    .to_string();
+                if workspace
+                    .doc(&id)
+                    .is_none_or(|d| !matches!(d.kind.as_str(), "scene" | "prefab"))
+                {
+                    return Err(vec![crate::invalid(format!(
+                        "`{}` is not a scene or prefab",
+                        p.scene
+                    ))]);
                 }
+                open_scene(&mut state, cx, id, agent.is_none())?;
             }
             "editor.theme" => {
                 let p: EditorTheme = parse(params)?;
@@ -792,6 +882,8 @@ impl Service for EditorService {
             }
             _ => return Err(vec![crate::invalid("unknown editor action")]),
         }
+        // The camera this caller now looks through (an agent's own, while separate).
+        let viewed = state.camera;
         if let Some((doc, selection, camera)) = human
             && let Some((id, author)) = agent
         {
@@ -814,7 +906,10 @@ impl Service for EditorService {
             .session()
             .map(|s| s.author.clone())
             .unwrap_or(ara_ops::Author::Human);
-        let result = self.navigation.commit(state, author, method, cx.root())?;
+        let mut result = self.navigation.commit(state, author, method, cx.root())?;
+        if method == "editor.camera" {
+            result["camera"] = json!(viewed);
+        }
         self.changes
             .send(self.navigation.state.clone())
             .map_err(|_| vec![crate::invalid("editor window has closed")])?;
@@ -861,4 +956,71 @@ fn safe_name(name: &str) -> Result<&str, Vec<Diagnostic>> {
 }
 fn ui_error(error: Box<dyn std::error::Error>) -> Vec<Diagnostic> {
     vec![crate::invalid(error.to_string())]
+}
+/// Frame the selection, or the scene's content when nothing is selected (terrain,
+/// ground planes and unbounded entities only when selected), keeping the view angle.
+fn frame(state: &mut EditorState, cx: &mut Cx) -> Result<(), Vec<Diagnostic>> {
+    let resolved = crate::world::resolve(cx.store(), &state.doc)?;
+    let transforms = crate::world::world_transforms(&resolved);
+    if let Some(bounds) =
+        crate::view_camera::framing_bounds(&resolved, &transforms, &state.selection)
+    {
+        crate::view_camera::fit(&mut state.camera, bounds);
+    }
+    Ok(())
+}
+/// The world pose (eye, view direction along local −Z) and vertical field of view
+/// in degrees of `entity`'s `Camera` in scene `doc`.
+fn scene_camera(
+    cx: &mut Cx,
+    doc: &str,
+    entity: &str,
+) -> Result<(Vec3, Vec3, f32), Vec<Diagnostic>> {
+    let resolved = crate::world::resolve(cx.store(), doc)?;
+    let lens = resolved
+        .get(entity)
+        .ok_or_else(|| vec![crate::invalid(format!("no entity `{entity}` in `{doc}`"))])?
+        .record
+        .get("Camera")
+        .ok_or_else(|| {
+            vec![crate::invalid(format!(
+                "`{entity}` has no Camera component; select a camera entity"
+            ))]
+        })?;
+    let lens: ara_runtime::components::Camera = serde_json::from_value(lens.clone())
+        .map_err(|e| vec![crate::invalid(format!("`{entity}`'s Camera: {e}"))])?;
+    let pose = crate::world::world_transforms(&resolved)
+        .remove(entity)
+        .unwrap_or_default();
+    let (_, rotation, position) = pose.to_scale_rotation_translation();
+    Ok((position, rotation * Vec3::NEG_Z, lens.fov))
+}
+/// Switch to scene `doc`: the outgoing scene keeps its camera, a reopened scene gets
+/// its own back and a first open gets its opening view (`view_camera::opening`). Humans (`human`) also update
+/// the recent-scenes list; agents only move their presence.
+fn open_scene(
+    state: &mut EditorState,
+    cx: &mut Cx,
+    doc: String,
+    human: bool,
+) -> Result<(), Vec<Diagnostic>> {
+    if state.doc != doc {
+        state.scene_cameras.insert(state.doc.clone(), state.camera);
+        state.doc = doc.clone();
+        state.selection.clear();
+        match state.scene_cameras.get(&doc) {
+            Some(camera) => state.camera = *camera,
+            None => {
+                let resolved = crate::world::resolve(cx.store(), &doc)?;
+                let transforms = crate::world::world_transforms(&resolved);
+                state.camera = crate::view_camera::opening(&resolved, &transforms);
+            }
+        }
+    }
+    if human {
+        state.recent_scenes.retain(|d| *d != doc);
+        state.recent_scenes.insert(0, doc);
+        state.recent_scenes.truncate(10);
+    }
+    Ok(())
 }

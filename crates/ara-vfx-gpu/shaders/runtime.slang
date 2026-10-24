@@ -7,7 +7,7 @@ struct Root {uint particles;uint lists;uint control;uint frame;uint tick;uint em
 #define BIND(n)
 ConstantBuffer<Root> root : register(b0,space0);
 #endif
-BIND(0) Texture2D<float4> textures[128] : register(t0,space1);
+BIND(5) Texture2D<float4> textures[] : register(t0,space1);
 BIND(1) RWByteAddressBuffer buffers[64] : register(u0,space2);
 BIND(2) SamplerState samplers[3] : register(s0,space0);
 struct Config {uint4 partition;uint4 lists;uint4 scratch;uint4 render;uint4 atlas;float4 surface;float4 boundsMin;float4 boundsMax;float4 lightColor;float4 lightPosition;uint4 appearance;float4 motion;};
@@ -39,7 +39,9 @@ void storeParticle(uint slot,Particle p,uint events){
     buffers[NonUniformResourceIndex(root.particles)].Store<uint4>((slot+3*n)*16,uint4(asuint(p.size),p.seed,p.birth,events));
 }
 float3 reconstruct(float2 uv,float z){float4 w=mul(frame().inverseVp,float4(uv.x*2-1,1-uv.y*2,z,1));return w.xyz/w.w;}
-float sceneDepth(uint2 pixel){Frame f=frame();float z=textures[NonUniformResourceIndex(f.inputs.y)].Load(int3(pixel,0)).r;return (f.visuals.z&1u)!=0&&z>0?f.clock.z/z:z;}
+// Scene depth in the effect's local units: sunDirection.w is world metres per
+// local unit (Placement.scale), applied to linear and reversed-Z depth alike.
+float sceneDepth(uint2 pixel){Frame f=frame();float z=textures[NonUniformResourceIndex(f.inputs.y)].Load(int3(pixel,0)).r;float s=f.sunDirection.w;return (f.visuals.z&1u)!=0&&z>0?f.clock.z*s/z:z*s;}
 void collideDepth(inout Particle p,float3 previous,float restitution,float thickness,inout uint events){
     Frame f=frame();if(f.inputs.z==0)return;
     float4 clip=mul(f.vp,float4(p.position,1));if(clip.w<=0)return;

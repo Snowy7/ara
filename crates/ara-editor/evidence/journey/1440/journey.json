@@ -1,0 +1,149 @@
+{
+  "finished": true,
+  "steps": [
+    {
+      "step": "01-open-scene-picker",
+      "what": "File > Open Scene lists every scene, recent first",
+      "ok": true,
+      "note": "",
+      "frames": 13,
+      "atSeconds": 9.9459246
+    },
+    {
+      "step": "02-scene-open",
+      "what": "the hangar scene opens, framed",
+      "ok": true,
+      "note": "File > Open Scene > hangar.scene",
+      "frames": 13,
+      "atSeconds": 12.9353361
+    },
+    {
+      "step": "03-import",
+      "what": "an imported glTF with its thumbnail and import settings",
+      "ok": true,
+      "note": "Assets > Import… rock.glb (copied into the project, imported off-thread)",
+      "frames": 61,
+      "atSeconds": 18.0691104
+    },
+    {
+      "step": "04-place",
+      "what": "the asset dragged into the Scene view",
+      "ok": true,
+      "note": "searched Assets for rock.glb, dragged it into the Scene view",
+      "frames": 31,
+      "atSeconds": 21.6883023
+    },
+    {
+      "step": "05-prefab",
+      "what": "Prefab from Selection: a linked instance and the prefab bar",
+      "ok": true,
+      "note": "Create > Prefab from Selection",
+      "frames": 13,
+      "atSeconds": 24.7477367
+    },
+    {
+      "step": "06-override",
+      "what": "an override (1 override) and the field menu to apply it",
+      "ok": true,
+      "note": "edited Scale in the Inspector (an override), right-clicked it",
+      "frames": 13,
+      "atSeconds": 26.2827366
+    },
+    {
+      "step": "07-apply-override",
+      "what": "Apply all writes the override into the prefab",
+      "ok": true,
+      "note": "Inspector prefab bar > Apply all",
+      "frames": 13,
+      "atSeconds": 27.8474289
+    },
+    {
+      "step": "08-export",
+      "what": "Build Current Profile exports the hangar as a real game",
+      "ok": true,
+      "note": "Project Settings > Main Scene = hangar.scene, then Build > Build Current Profile (no profile yet: it creates presets/windows.export.json); the game is in builds/windows-1792862561/build",
+      "frames": 9053,
+      "atSeconds": 90.5109222
+    },
+    {
+      "step": "09-run-build",
+      "what": "Run Build: the exported game runs headless for one frame",
+      "ok": true,
+      "note": "Build > Run Build (offscreen: the game runs headless for one frame and captures it); its frame is 09-run-build-game.png",
+      "frames": 1039,
+      "atSeconds": 98.5075531
+    },
+    {
+      "step": "10-script",
+      "what": "a C# behaviour created in the project's module",
+      "ok": true,
+      "note": "Create > C# Behaviour (Spinner.cs; outside verification it opens in the IDE)",
+      "frames": 13,
+      "atSeconds": 99.9634338
+    },
+    {
+      "step": "11-play",
+      "what": "Play inside the Game view, walking with W",
+      "ok": true,
+      "note": "Play (F5) in the Game view; clicked the Game view and held W: the Salvager walks",
+      "frames": 423,
+      "atSeconds": 113.2540599
+    },
+    {
+      "step": "12-hot-reload",
+      "what": "the edited script hot-reloads while playing",
+      "ok": true,
+      "note": "edited Spinner.cs while playing and saved; the Console shows the reload",
+      "frames": 31,
+      "atSeconds": 113.82246430000001
+    },
+    {
+      "step": "13-failure",
+      "what": "a broken script: the compile error in Problems with its why",
+      "ok": true,
+      "note": "deleted a semicolon in Spinner.cs while playing; the compile error is in Problems, Why explains it",
+      "frames": 31,
+      "atSeconds": 114.408416
+    },
+    {
+      "step": "14-stop",
+      "what": "the script fixed, Play stopped",
+      "ok": true,
+      "note": "fixed the script, stopped Play",
+      "frames": 13,
+      "atSeconds": 115.5275511
+    },
+    {
+      "step": "15-undo",
+      "what": "Edit > Undo names the change",
+      "ok": true,
+      "note": "moved the rock; the Edit menu's Undo names the move",
+      "frames": 13,
+      "atSeconds": 116.8724551
+    },
+    {
+      "step": "16-save-reopen",
+      "what": "saved, another scene opened, the hangar reopened",
+      "ok": true,
+      "note": "Undo, Save, open outpost.scene, reopen hangar.scene (its camera comes back)",
+      "frames": 13,
+      "atSeconds": 118.2571887
+    },
+    {
+      "step": "17-export-csharp",
+      "what": "Build Current Profile again ships the C# module (NativeAOT)",
+      "ok": true,
+      "note": "Build > Build Current Profile again: the project now has a C# module, which the export publishes NativeAOT; the game is in builds/windows-1792862651/build",
+      "frames": 10643,
+      "atSeconds": 189.411869
+    },
+    {
+      "step": "18-run-build-csharp",
+      "what": "Run Build: the game with its C# runs headless for one frame",
+      "ok": true,
+      "note": "Build > Run Build (offscreen: the game runs headless for one frame and captures it); its frame is 18-run-build-csharp-game.png",
+      "frames": 960,
+      "atSeconds": 196.8767876
+    }
+  ]
+}

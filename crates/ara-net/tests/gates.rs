@@ -12,6 +12,109 @@ use std::{
 use support::*;
 
 #[test]
+fn explicit_clock_preserves_ticks_inputs_and_replay_across_frame_sizes() -> Result<()> {
+    let make_server = || -> Result<Server<Movement>> {
+        let mut server = Server::<Movement>::new(
+            session()?,
+            policies()?,
+            ServerConfig {
+                mode: SessionMode::Listen,
+                start_clients: 0,
+                tick_limit: Some(600),
+                ..Default::default()
+            },
+        )?;
+        configure(&mut server)?;
+        server.record(build(), vec![])?;
+        for tick in 1..=600 {
+            server.inject_host(
+                tick,
+                Injection {
+                    player: PlayerId(0),
+                    action: "Move".into(),
+                    value: script(tick, PlayerId(0)).unwrap(),
+                    hold_ticks: 1,
+                },
+            )?;
+        }
+        Ok(server)
+    };
+    let mut coarse = make_server()?;
+    let mut fine = make_server()?;
+    for _ in 0..1500 {
+        coarse.advance(Duration::from_millis(10))?;
+        fine.advance(Duration::from_millis(5))?;
+        fine.advance(Duration::from_millis(5))?;
+    }
+    assert_eq!(coarse.session().tick(), 600);
+    assert_eq!(fine.session().tick(), 600);
+    assert_eq!(coarse.session().state_hash()?, fine.session().state_hash()?);
+    assert_eq!(coarse.records(), fine.records());
+    assert_eq!(coarse.trace().unwrap().replay(&mut session()?)?, None);
+    assert_eq!(fine.trace().unwrap().replay(&mut session()?)?, None);
+    Ok(())
+}
+
+#[test]
+fn spawn_baselines_preserve_projection_ownership() -> Result<()> {
+    let mut registry = ara_sim::SimRegistry::new(schema())?;
+    registry.register_component::<Item>()?;
+    let scene = ara_doc::read(
+        r#"{"$schema":"ara://schema/scene/1","id":"sc_baselines","records":{"e_projected":{"Item":{"x":0.0,"available":true}}}}"#,
+        "scene.scene", registry.schema(), None,
+    ).doc.expect("projected baseline fixture");
+    let mut sim = ara_sim::Session::local(
+        ara_sim::EditWorld::new(registry, scene)?,
+        ara_sim::TickConfig::default(),
+        1,
+        Default::default(),
+    )?;
+    sim.world_mut().spawn((
+        ara_sim::Identity("e_runtime".into()),
+        Item {
+            x: 2.0,
+            available: true,
+        },
+    ));
+    let mut server = Server::<Movement>::new(
+        sim,
+        policies()?,
+        ServerConfig {
+            tick_limit: Some(1),
+            ..Default::default()
+        },
+    )?;
+    let endpoint = server.address()?;
+    let mut client = Client::<Movement>::new(
+        policies()?,
+        ClientConfig {
+            player: PlayerId(0),
+            endpoint,
+            hz: 60,
+            tick_limit: Some(1),
+        },
+        server.token(PlayerId(0), endpoint)?,
+    )?;
+    let start = Instant::now();
+    loop {
+        server.poll()?;
+        client.poll()?;
+        let spawns = client.spawns();
+        if spawns.len() == 2 {
+            for spawn in spawns {
+                assert_eq!(spawn.projected, spawn.identity == "e_projected");
+            }
+            return Ok(());
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "spawn baselines did not arrive"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[test]
 fn local_has_zero_serialization_or_network_resources() -> Result<()> {
     use std::sync::atomic::Ordering;
     let mut sim = session()?;
@@ -254,6 +357,7 @@ fn schema_privacy_quantization_intent_replay_and_lifecycle() -> Result<()> {
     let spawn = Spawn {
         id: new,
         identity: "two".into(),
+        projected: false,
         prefab: "@a.prefab#e_0001".into(),
         version: [0; 32],
         owner: Some(PlayerId(2)),
@@ -393,6 +497,81 @@ fn datagram_conditions_duplicate_reorder_drop_and_shape() -> Result<()> {
 }
 
 #[test]
+fn prediction_reconciles_confirmations_beyond_twenty_ticks() -> Result<()> {
+    let mut link = Link::new(
+        21668,
+        Conditions {
+            latency_ms: 250,
+            ..Default::default()
+        },
+    )?;
+    let endpoint = link.address()?;
+    let mut server = Server::<Movement>::new(
+        session()?,
+        policies()?,
+        ServerConfig {
+            max_clients: 1,
+            start_clients: 1,
+            expected_addresses: vec![endpoint],
+            tick_limit: Some(600),
+            ..Default::default()
+        },
+    )?;
+    configure(&mut server)?;
+    server.record(build(), vec![21668])?;
+    link.set_server(server.address()?);
+    let mut client = Client::<Movement>::new(
+        policies()?,
+        ClientConfig {
+            player: PlayerId(0),
+            endpoint,
+            hz: 60,
+            tick_limit: Some(600),
+        },
+        server.token(PlayerId(0), endpoint)?,
+    )?;
+    client.input_source(script);
+    client.perturb_prediction(330, |state| state.x += 250);
+    let frame = Duration::from_secs_f64(1.0 / 60.0);
+    let start = Instant::now();
+    for step in 1..=1800 {
+        let now = start + frame * step;
+        link.pump(now, false)?;
+        server.advance(frame)?;
+        client.advance(frame)?;
+        link.pump(now, false)?;
+        if server.session().tick() != 600 || client.status().tick != 600 {
+            continue;
+        }
+        let Some(owner) = client
+            .spawns()
+            .into_iter()
+            .find(|spawn| spawn.owner == Some(PlayerId(0)))
+        else {
+            continue;
+        };
+        let authority = *server
+            .session()
+            .world()
+            .get::<Motor>(server.session().entity(&owner.identity).unwrap())
+            .unwrap();
+        if client.status().predicted_tick >= 608
+            && client.state(owner.id) == Some(authority)
+            && client.view(owner.id) == Some(authority)
+        {
+            assert!(client.status().rollbacks > 0);
+            assert_eq!(client.status().privacy_leaks, 0);
+            assert_eq!(server.trace().unwrap().replay(&mut session()?)?, None);
+            return Ok(());
+        }
+    }
+    panic!(
+        "delayed confirmations did not reconcile: {:?}",
+        client.status()
+    );
+}
+
+#[test]
 fn local_listen_dedicated_late_join_adverse_and_bandwidth() -> Result<()> {
     for mode in [SessionMode::Dedicated, SessionMode::Listen] {
         run(mode)?;
@@ -478,14 +657,17 @@ fn run(mode: SessionMode) -> Result<()> {
         }
     }
     let start = Instant::now();
+    let frame = Duration::from_secs_f64(1.0 / 60.0);
+    let mut elapsed = Duration::ZERO;
     let mut heal = std::collections::BTreeSet::new();
     let mut late_baseline = 0;
     let mut measure_start = None;
     let mut measure_end = None;
     let mut deferred_seen = false;
     loop {
-        let now = Instant::now();
-        if start.elapsed() > Duration::from_secs(30) {
+        elapsed += frame;
+        let now = start + elapsed;
+        if elapsed > Duration::from_secs(30) {
             panic!(
                 "convergence deadline {:?} at {}: {:?}",
                 mode,
@@ -520,12 +702,12 @@ fn run(mode: SessionMode) -> Result<()> {
         for link in links.iter_mut().skip(remote_start) {
             link.pump(now, measure)?;
         }
-        server.poll()?;
+        server.advance(frame)?;
         if server.session().tick() >= 100 {
             server.position("e_0003", [0.0; 2])?;
         }
         for (&p, client) in &mut clients {
-            client.poll()?;
+            client.advance(frame)?;
             let status = client.status();
             deferred_seen |= status.pending_references > 0;
             if p == 3 && status.tick > 0 && late_baseline == 0 {
@@ -554,6 +736,7 @@ fn run(mode: SessionMode) -> Result<()> {
             let spawns = clients.values_mut().next().unwrap().spawns();
             let converged = clients.iter_mut().all(|(&p, c)| {
                 c.status().tick == 600
+                    && c.status().predicted_tick >= 608
                     && spawns
                         .iter()
                         .filter(|s| s.identity.starts_with("player"))
@@ -572,9 +755,23 @@ fn run(mode: SessionMode) -> Result<()> {
                 break;
             }
         }
-        std::thread::sleep(Duration::from_millis(2));
     }
     assert!(late_baseline >= 180);
+    // The 180-tick neutral tail exceeds the link delay and input redundancy.
+    // Check what the authority actually consumed, rather than only final state.
+    for record in server.records().iter().filter(|r| r.tick >= 420) {
+        for input in &record.inputs {
+            if input.action == "Move" {
+                assert_eq!(
+                    input.value,
+                    ara_input::ActionValue::Axis2([0.0; 2]),
+                    "motion remained at tick {} for {:?}",
+                    record.tick,
+                    input.player
+                );
+            }
+        }
+    }
     assert_eq!(server.budgets()[&PlayerId(remote_start as u64)], 3200);
     assert!(
         deferred_seen,
@@ -614,6 +811,7 @@ fn run(mode: SessionMode) -> Result<()> {
         corrections += status.corrections.len();
         max_correction = max_correction.max(status.corrections.into_iter().fold(0.0, f64::max));
         for spawn in client.spawns() {
+            assert!(!spawn.projected, "these lifetimes were created at runtime");
             if spawn.identity.starts_with("player") {
                 let inv = client.component(spawn.id, "Inventory")?.unwrap();
                 assert_eq!(inv["secret"], serde_json::Value::Null);

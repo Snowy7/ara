@@ -1,6 +1,5 @@
 ---
 source: crates/ara/tests/cli.rs
-assertion_line: 93
 expression: out
 ---
 {
@@ -663,6 +662,164 @@ expression: out
         }
       }
     },
+    "AnimationClipSetParams": {
+      "kind": "params",
+      "doc": "Replace animation clip keys.",
+      "module": "animation",
+      "fields": {
+        "id": {
+          "type": "string",
+          "doc": "Existing animation record ID or a symbol created earlier in the batch.",
+          "required": true
+        },
+        "value": {
+          "type": "ClipData",
+          "doc": "Replacement typed source data.",
+          "required": true
+        }
+      }
+    },
+    "AnimationControllerSetParams": {
+      "kind": "params",
+      "doc": "Replace an animation controller graph.",
+      "module": "animation",
+      "fields": {
+        "id": {
+          "type": "string",
+          "doc": "Existing animation record ID or a symbol created earlier in the batch.",
+          "required": true
+        },
+        "value": {
+          "type": "AnimController",
+          "doc": "Replacement typed source data.",
+          "required": true
+        }
+      }
+    },
+    "AnimationCreateParams": {
+      "kind": "params",
+      "doc": "Create one animation asset (skeleton, clip, controller or procedural setup).",
+      "module": "animation",
+      "fields": {
+        "id": {
+          "type": "option<string>",
+          "doc": "Stable record ID or batch symbol; generated when omitted.",
+          "default": null
+        },
+        "asset": {
+          "type": "AnimAsset",
+          "doc": "Typed animation source asset.",
+          "required": true
+        }
+      }
+    },
+    "AnimationIkSetParams": {
+      "kind": "params",
+      "doc": "Replace procedural animation contact chains.",
+      "module": "animation",
+      "fields": {
+        "id": {
+          "type": "string",
+          "doc": "Existing animation record ID or a symbol created earlier in the batch.",
+          "required": true
+        },
+        "value": {
+          "type": "IkSetup",
+          "doc": "Replacement typed source data.",
+          "required": true
+        }
+      }
+    },
+    "AnimationMotionDatabaseSetParams": {
+      "kind": "params",
+      "doc": "Replace pose-search database configuration.",
+      "module": "animation",
+      "fields": {
+        "id": {
+          "type": "string",
+          "doc": "Existing animation record ID or a symbol created earlier in the batch.",
+          "required": true
+        },
+        "value": {
+          "type": "MatchConfig",
+          "doc": "Replacement typed source data.",
+          "required": true
+        }
+      }
+    },
+    "AnimationPropertySetParams": {
+      "kind": "params",
+      "doc": "Edit one schema-addressed field of an animation record.",
+      "module": "animation",
+      "fields": {
+        "id": {
+          "type": "string",
+          "doc": "Animation record ID.",
+          "required": true
+        },
+        "path": {
+          "type": "string",
+          "doc": "Reflected field path, including nested graph and curve fields.",
+          "required": true
+        },
+        "value": {
+          "type": "json",
+          "doc": "Typed JSON replacement; null removes the stored value to its default.",
+          "required": true
+        }
+      }
+    },
+    "AnimationRagdollSetParams": {
+      "kind": "params",
+      "doc": "Replace a physical animation ragdoll profile.",
+      "module": "animation",
+      "fields": {
+        "id": {
+          "type": "string",
+          "doc": "Existing animation record ID or a symbol created earlier in the batch.",
+          "required": true
+        },
+        "value": {
+          "type": "RagdollProfile",
+          "doc": "Replacement typed source data.",
+          "required": true
+        }
+      }
+    },
+    "AnimationRigSetParams": {
+      "kind": "params",
+      "doc": "Replace semantic humanoid bone bindings.",
+      "module": "animation",
+      "fields": {
+        "id": {
+          "type": "string",
+          "doc": "Existing animation record ID or a symbol created earlier in the batch.",
+          "required": true
+        },
+        "value": {
+          "type": "RigMap",
+          "doc": "Replacement typed source data.",
+          "required": true
+        }
+      }
+    },
+    "AnimationSkeletonSetParams": {
+      "kind": "params",
+      "doc": "Replace animation skeleton source.",
+      "module": "animation",
+      "fields": {
+        "id": {
+          "type": "string",
+          "doc": "Existing animation record ID or a symbol created earlier in the batch.",
+          "required": true
+        },
+        "value": {
+          "type": "SkeletonData",
+          "doc": "Replacement typed source data.",
+          "required": true
+        }
+      }
+    },
     "Animator": {
       "kind": "component",
       "doc": "Skeletal animation for this entity's `MeshRenderer.model`, compiled to an ara-anim program: the `controller` document when set, else an `idle` state and a `move` state whose 1D blend tree is driven by the entity's ground speed, cross-faded at `moveThreshold`.",
@@ -831,6 +988,19 @@ expression: out
         }
       }
     },
+    "AudioEffectCodec": {
+      "kind": "enum",
+      "doc": "Codec for resident sound effects; streamed audio always uses Opus.",
+      "module": "asset",
+      "variants": {
+        "pcm": {
+          "doc": "Signed 16-bit PCM."
+        },
+        "adpcm": {
+          "doc": "IMA ADPCM."
+        }
+      }
+    },
     "AudioGraphAddParams": {
       "kind": "params",
       "doc": "Adds an operation node.",
@@ -962,6 +1132,60 @@ expression: out
           "type": "string",
           "doc": "Complete `.audiograph` source.",
           "required": true
+        }
+      }
+    },
+    "AudioImportSettings": {
+      "kind": "struct",
+      "doc": "Audio sidecar settings, validated identically by authoring commands and workers.",
+      "module": "asset",
+      "fields": {
+        "usage": {
+          "type": "AudioImportUse",
+          "doc": "Resident effect, streamed music or streamed dialogue.",
+          "default": "shortEffect",
+          "options": [
+            "shortEffect",
+            "music",
+            "dialogue"
+          ]
+        },
+        "codec": {
+          "type": "AudioEffectCodec",
+          "doc": "Codec for resident effects.",
+          "default": "pcm",
+          "options": [
+            "pcm",
+            "adpcm"
+          ]
+        },
+        "opusBitrate": {
+          "type": "i32",
+          "doc": "Stereo Opus bitrate for music/dialogue, in bits per second.",
+          "default": 128000,
+          "range": [6000, 512000]
+        },
+        "decodedBudget": {
+          "type": "u64",
+          "doc": "Resident decoded PCM budget in bytes; streamed cooking uses bounded blocks.",
+          "default": 67108864,
+          "range": [65536, null]
+        }
+      }
+    },
+    "AudioImportUse": {
+      "kind": "enum",
+      "doc": "Audio use selects resident effects or streamed music/dialogue.",
+      "module": "asset",
+      "variants": {
+        "shortEffect": {
+          "doc": "Resident sound effect."
+        },
+        "music": {
+          "doc": "Streamed music encoded as Opus."
+        },
+        "dialogue": {
+          "doc": "Streamed dialogue encoded as Opus."
         }
       }
     },
@@ -1819,8 +2043,16 @@ expression: out
             "sphere",
             "capsule",
             "cylinder",
-            "cooked"
+            "cooked",
+            "modelConvex",
+            "modelMesh"
           ]
+        },
+        "center": {
+          "type": "vec3",
+          "doc": "Shape center in body-local metres, after visual scale is baked. The body origin remains at Transform/PhysicsPose; rotation also rotates this offset.",
+          "default": [0, 0, 0],
+          "unit": "m"
         },
         "halfExtents": {
           "type": "vec3",
@@ -1846,6 +2078,16 @@ expression: out
         "asset": {
           "type": "option<asset>",
           "doc": "Cooked collision asset (`@path#id`); resolve into `CookedCollider` before ticking.",
+          "default": null
+        },
+        "node": {
+          "type": "option<string>",
+          "doc": "Source model node name/index for model-derived geometry; absent uses its default scene.",
+          "default": null
+        },
+        "primitive": {
+          "type": "option<u32>",
+          "doc": "Subtree-local primitive for model-derived geometry; absent uses the complete subtree.",
           "default": null
         },
         "layer": {
@@ -1940,6 +2182,47 @@ expression: out
         }
       }
     },
+    "ColliderFromModelParams": {
+      "kind": "params",
+      "doc": "Derive a collider from an imported model or the entity's MeshRenderer selection.",
+      "module": "physics",
+      "fields": {
+        "entity": {
+          "type": "entity",
+          "doc": "Target entity, including prefab addresses.",
+          "required": true
+        },
+        "model": {
+          "type": "option<asset>",
+          "doc": "Source import; omitted uses MeshRenderer.model.",
+          "default": null
+        },
+        "node": {
+          "type": "option<string>",
+          "doc": "Source node name/index; omitted inherits MeshRenderer.node when model is omitted.",
+          "default": null
+        },
+        "primitive": {
+          "type": "option<u32>",
+          "doc": "Subtree-local primitive; omitted inherits MeshRenderer.primitive when model is omitted.",
+          "default": null
+        },
+        "mode": {
+          "type": "ModelColliderMode",
+          "doc": "Convex hull by default, or a static triangle surface.",
+          "default": "convex",
+          "options": [
+            "convex",
+            "mesh"
+          ]
+        },
+        "center": {
+          "type": "option<vec3>",
+          "doc": "Optional center in body-local metres, after visual scale is baked.",
+          "default": null
+        }
+      }
+    },
     "ColliderKind": {
       "kind": "enum",
       "doc": "Primitive or cooked geometry selection. Cooked geometry is resolved by the asset worker.",
@@ -1959,6 +2242,12 @@ expression: out
         },
         "cooked": {
           "doc": "Immutable cooked hull, mesh, terrain or compound, attached as `CookedCollider`."
+        },
+        "modelConvex": {
+          "doc": "Convex hull from the selected cooked model geometry; supports moving bodies."
+        },
+        "modelMesh": {
+          "doc": "Triangle surface from the selected cooked model geometry; static bodies only."
         }
       }
     },
@@ -2045,6 +2334,22 @@ expression: out
         }
       }
     },
+    "CookPreset": {
+      "kind": "enum",
+      "doc": "Encoding quality is an explicit cook input, independent of the execution budget. Direct/ shipping cooks default to high quality; editor previews use `Fast`.",
+      "module": "asset",
+      "variants": {
+        "highQuality": {
+          "doc": "ISPC BC7 slow and BC6H very slow, for background recooks and shipping."
+        },
+        "fast": {
+          "doc": "ISPC BC7 ultrafast and BC6H fast, for the first interactive generation."
+        },
+        "balanced": {
+          "doc": "ISPC BC7/BC6H basic, for projects choosing a middle quality/speed tradeoff."
+        }
+      }
+    },
     "Curve": {
       "kind": "struct",
       "doc": "An animation curve addressing the same property path as the inspector.",
@@ -2068,6 +2373,39 @@ expression: out
             "linear",
             "step"
           ]
+        }
+      }
+    },
+    "DocCreateParams": {
+      "kind": "params",
+      "doc": "Parameters of `doc.create`.",
+      "fields": {
+        "path": {
+          "type": "string",
+          "doc": "Project-relative output path, with the document kind's extension.",
+          "required": true
+        },
+        "kind": {
+          "type": "option<string>",
+          "doc": "Registered kind, or the material template (.graph); inferred from the path when omitted.",
+          "default": null
+        },
+        "id": {
+          "type": "option<string>",
+          "doc": "Stable asset ID or batch symbol; generated when omitted.",
+          "default": null
+        }
+      }
+    },
+    "DocDeleteParams": {
+      "kind": "params",
+      "doc": "Parameters of `doc.delete`.",
+      "module": "core",
+      "fields": {
+        "document": {
+          "type": "asset",
+          "doc": "Loaded document path or asset reference to remove. Run from a different batch document, such as ara.project.json; project settings cannot be deleted.",
+          "required": true
         }
       }
     },
@@ -2219,6 +2557,19 @@ expression: out
         }
       }
     },
+    "ExposureMode": {
+      "kind": "enum",
+      "doc": "How the camera exposes the scene.",
+      "module": "render",
+      "variants": {
+        "auto": {
+          "doc": "Meter the frame's luminance and adapt within `minEv100`..`maxEv100`."
+        },
+        "manual": {
+          "doc": "Fixed photographic exposure `ev100`."
+        }
+      }
+    },
     "Flipbook": {
       "kind": "component",
       "doc": "Tick-driven flipbook state, wholly contained in an ECS component.",
@@ -2302,6 +2653,11 @@ expression: out
       "doc": "Exclusion insertion parameters.",
       "module": "foliage",
       "fields": {
+        "id": {
+          "type": "option<string>",
+          "doc": "Optional concrete or symbolic exclusion ID for reproducible authoring.",
+          "default": null
+        },
         "zone": {
           "type": "FoliageExclusion",
           "doc": "Circular exclusion zone.",
@@ -2498,7 +2854,7 @@ expression: out
         },
         "distance": {
           "type": "f32",
-          "doc": "Orbit distance from the aim point.",
+          "doc": "Orbit distance from the aim point; the boom stops in front of static box colliders.",
           "default": 5,
           "unit": "m",
           "range": [0.1, null]
@@ -2797,6 +3153,44 @@ expression: out
         }
       }
     },
+    "HeightFog": {
+      "kind": "component",
+      "doc": "Exponential height fog lit by the sun, the sky and local lights (volumetric shafts where shadows cut the beams). Density halves every `falloff × ln 2` metres above `baseHeight`. The first entity in ID order wins.",
+      "module": "render",
+      "fields": {
+        "density": {
+          "type": "f32",
+          "doc": "Extinction at `baseHeight`, per metre. 0.002 is a light haze (visibility ≈ 1.5 km), 0.02 a thick fog (≈ 150 m).",
+          "default": 0.002,
+          "range": [0, 0.1],
+          "examples": [0.004]
+        },
+        "baseHeight": {
+          "type": "f32",
+          "doc": "World altitude where the fog has its full density.",
+          "default": 0,
+          "unit": "m"
+        },
+        "falloff": {
+          "type": "f32",
+          "doc": "Scale height: density falls by a factor of e over this many metres of altitude.",
+          "default": 60,
+          "unit": "m",
+          "range": [1, 10000]
+        },
+        "albedo": {
+          "type": "color",
+          "doc": "Scattering colour (single-scattering albedo, linear). Grey-white for water fog, warm for dust.",
+          "default": [0.9, 0.9, 0.9, 1]
+        },
+        "anisotropy": {
+          "type": "f32",
+          "doc": "Forward-scattering bias: 0 is uniform, toward 1 the fog glows around the sun and lamps.",
+          "default": 0.3,
+          "range": [0, 0.9]
+        }
+      }
+    },
     "IkSetup": {
       "kind": "struct",
       "doc": "Canonical procedural rig setup; goal values are fixed-tick gameplay inputs.",
@@ -2821,6 +3215,113 @@ expression: out
           "type": "FootSettings",
           "doc": "Ground probe, slope and pelvis bounds.",
           "default": {}
+        }
+      }
+    },
+    "ImportConfigureParams": {
+      "kind": "params",
+      "doc": "Parameters of `import.configure`.",
+      "module": "asset",
+      "fields": {
+        "source": {
+          "type": "string",
+          "doc": "Source media path whose existing sidecar should change.",
+          "required": true
+        },
+        "settings": {
+          "type": "option<json>",
+          "doc": "Replacement importer-specific settings; omitted retains them.",
+          "default": null
+        },
+        "preset": {
+          "type": "option<CookPreset>",
+          "doc": "Replacement shipping preset; omitted retains it.",
+          "default": null,
+          "options": [
+            "highQuality",
+            "fast",
+            "balanced"
+          ]
+        },
+        "dependencies": {
+          "type": "option<list<asset>>",
+          "doc": "Replacement authoring dependencies; omitted retains them.",
+          "default": null
+        }
+      }
+    },
+    "ImportInitializeParams": {
+      "kind": "params",
+      "doc": "Parameters of `import.initialize`.",
+      "module": "asset",
+      "fields": {
+        "source": {
+          "type": "string",
+          "doc": "Existing source media path, relative to the project.",
+          "required": true
+        },
+        "id": {
+          "type": "option<string>",
+          "doc": "Stable asset ID or batch symbol; generated when omitted.",
+          "default": null
+        },
+        "settings": {
+          "type": "option<json>",
+          "doc": "Importer-specific settings; defaults when omitted.",
+          "default": null
+        },
+        "preset": {
+          "type": "option<CookPreset>",
+          "doc": "Shipping cook quality; defaults to the engine's shipping preset.",
+          "default": null,
+          "options": [
+            "highQuality",
+            "fast",
+            "balanced"
+          ]
+        },
+        "dependencies": {
+          "type": "option<list<asset>>",
+          "doc": "Referenced authoring assets used by the cook.",
+          "default": null
+        }
+      }
+    },
+    "ImportSettings": {
+      "kind": "record",
+      "doc": "Declarative importer configuration, stored as the single `i_settings` record.",
+      "module": "asset",
+      "prefix": "i",
+      "fields": {
+        "preset": {
+          "type": "CookPreset",
+          "doc": "Final shipping quality; the editor may show a fast generation first.",
+          "default": "highQuality",
+          "options": [
+            "highQuality",
+            "fast",
+            "balanced"
+          ]
+        },
+        "importer": {
+          "type": "string",
+          "doc": "Stable worker importer ID.",
+          "default": ""
+        },
+        "version": {
+          "type": "string",
+          "doc": "Exact importer version, including encoder implementation versions.",
+          "default": ""
+        },
+        "settings": {
+          "type": "json",
+          "doc": "Importer-specific typed settings, canonicalized recursively.",
+          "default": null
+        },
+        "dependencies": {
+          "type": "list<asset>",
+          "doc": "Referenced authoring assets, using project-relative `@path#id` syntax.",
+          "default": []
         }
       }
     },
@@ -3779,6 +4280,21 @@ expression: out
             "mesh"
           ]
         },
+        "node": {
+          "type": "option<string>",
+          "doc": "Source node name or numeric glTF index. `name:3` selects a numeric name. The drawable subtree retains source rotation/scale and restores its pivot to the entity origin. Absent selects the complete default scene.",
+          "default": null
+        },
+        "primitive": {
+          "type": "option<u32>",
+          "doc": "Zero-based primitive within the selected subtree (or whole model).",
+          "default": null
+        },
+        "materialOverrides": {
+          "type": "list<PrimitiveMaterialOverride>",
+          "doc": "Native material assets by subtree-local primitive slot; omitted slots use the model.",
+          "default": []
+        },
         "color": {
           "type": "color",
           "doc": "Linear base color multiplier and opacity.",
@@ -3801,8 +4317,59 @@ expression: out
         },
         "emissive": {
           "type": "vec3",
-          "doc": "Emitted radiance in candela per square metre (linear RGB).",
+          "doc": "Default procedural radiance, or an RGB emission multiplier with a model/material asset. Models treat zero RGB as neutral; use `emissiveEnabled` to switch them off.",
           "default": [0, 0, 0]
+        },
+        "emissiveEnabled": {
+          "type": "bool",
+          "doc": "Enables emission without modifying the source model or its materials.",
+          "default": true
+        },
+        "emissiveStrength": {
+          "type": "f32",
+          "doc": "Emission multiplier, applied once after the source or overridden factor.",
+          "default": 1,
+          "range": [0, null]
+        },
+        "emissiveFactor": {
+          "type": "option<vec3>",
+          "doc": "Optional linear RGB replacement for the source emissive factor, useful for lamps.",
+          "default": null,
+          "range": [0, null]
+        },
+        "emissiveMaterials": {
+          "type": "list<string>",
+          "doc": "Source material names or numeric indices affected by `emissiveFactor`. Empty targets all; `name:3` disambiguates a numeric material name.",
+          "default": []
+        }
+      }
+    },
+    "MeshSettings": {
+      "kind": "struct",
+      "doc": "Deterministic geometry cook policy.",
+      "module": "asset",
+      "fields": {
+        "lodCount": {
+          "type": "u32",
+          "doc": "Maximum number of LODs, including the original (1–8).",
+          "default": 4,
+          "range": [1, 8]
+        },
+        "lodError": {
+          "type": "f32",
+          "doc": "Relative simplification error ceiling.",
+          "default": 0.01,
+          "range": [0, null]
+        },
+        "virtualGeometry": {
+          "type": "bool",
+          "doc": "Cook a versioned virtual-geometry DAG for each static material primitive. Skinned and morph-deformed meshes retain the classic path.",
+          "default": true
+        },
+        "opacityMaps": {
+          "type": "map<string>",
+          "doc": "glTF base-color image URI (or #image-index) to companion opacity image URI. The mask's red channel multiplies existing alpha; paths are relative to the model.",
+          "default": {}
         }
       }
     },
@@ -3822,6 +4389,19 @@ expression: out
         },
         "plane": {
           "doc": "Upward-facing quad spanning `size.x` by `size.z`."
+        }
+      }
+    },
+    "ModelColliderMode": {
+      "kind": "enum",
+      "doc": "Geometry used by a model-derived collider.",
+      "module": "physics",
+      "variants": {
+        "convex": {
+          "doc": "Convex hull, usable by static, kinematic and dynamic bodies."
+        },
+        "mesh": {
+          "doc": "Exact triangle surface, usable only by static bodies."
         }
       }
     },
@@ -3952,6 +4532,23 @@ expression: out
         }
       }
     },
+    "MusicSegmentSetParams": {
+      "kind": "params",
+      "doc": "Create or replace a music segment with stems and tempo map.",
+      "module": "audio",
+      "fields": {
+        "id": {
+          "type": "option<string>",
+          "doc": "Existing record ID, stable new ID or batch symbol; generated when omitted.",
+          "default": null
+        },
+        "segment": {
+          "type": "MusicSegment",
+          "doc": "Complete typed music record; omitted fields take their reflected defaults.",
+          "required": true
+        }
+      }
+    },
     "MusicSettings": {
       "kind": "record",
       "doc": "Music-wide settings (one record).",
@@ -3980,6 +4577,18 @@ expression: out
           "type": "u32",
           "doc": "Seed for weighted follow-ups (deterministic resequencing).",
           "default": 0
+        }
+      }
+    },
+    "MusicSettingsSetParams": {
+      "kind": "params",
+      "doc": "Music-wide starting segment, intensity, layer fade and deterministic seed.",
+      "module": "audio",
+      "fields": {
+        "settings": {
+          "type": "MusicSettings",
+          "doc": "Complete music settings, stored in the unique ms_settings record.",
+          "required": true
         }
       }
     },
@@ -4076,6 +4685,23 @@ expression: out
         }
       }
     },
+    "MusicStingerSetParams": {
+      "kind": "params",
+      "doc": "Create or replace a grid-aligned music stinger.",
+      "module": "audio",
+      "fields": {
+        "id": {
+          "type": "option<string>",
+          "doc": "Existing record ID, stable new ID or batch symbol; generated when omitted.",
+          "default": null
+        },
+        "stinger": {
+          "type": "MusicStinger",
+          "doc": "Complete typed music record; omitted fields take their reflected defaults.",
+          "required": true
+        }
+      }
+    },
     "MusicSync": {
       "kind": "enum",
       "doc": "Where a transition or stinger may land.",
@@ -4157,6 +4783,23 @@ expression: out
           "type": "string",
           "doc": "Optional bridge segment played between them.",
           "default": ""
+        }
+      }
+    },
+    "MusicTransitionSetParams": {
+      "kind": "params",
+      "doc": "Create or replace a synchronized music transition.",
+      "module": "audio",
+      "fields": {
+        "id": {
+          "type": "option<string>",
+          "doc": "Existing record ID, stable new ID or batch symbol; generated when omitted.",
+          "default": null
+        },
+        "transition": {
+          "type": "MusicTransition",
+          "doc": "Complete typed music record; omitted fields take their reflected defaults.",
+          "required": true
         }
       }
     },
@@ -4698,9 +5341,9 @@ expression: out
       "fields": {
         "value": {
           "type": "u64",
-          "doc": "Stable scene/network identity, used to sort creation and inputs across peers.",
-          "default": 1,
-          "range": [1, null]
+          "doc": "Stable scene/network identity. Zero asks Play to assign a unique value from the entity identity; positive values explicitly reserve an identity.",
+          "default": 0,
+          "range": [0, null]
         }
       }
     },
@@ -4829,6 +5472,93 @@ expression: out
         }
       }
     },
+    "PostProcess": {
+      "kind": "component",
+      "doc": "Camera exposure, tone mapping, bloom and colour grading. The first entity in ID order wins; without one, renderers meter automatically with Filmic tone mapping.",
+      "module": "render",
+      "fields": {
+        "exposure": {
+          "type": "ExposureMode",
+          "doc": "Automatic metering or a fixed exposure.",
+          "default": "auto",
+          "options": [
+            "auto",
+            "manual"
+          ]
+        },
+        "ev100": {
+          "type": "f32",
+          "doc": "Manual exposure value at ISO 100. Sunny day ≈ 15, overcast ≈ 12, sunset ≈ 10, lit interior ≈ 7, night street ≈ 3.",
+          "default": 10,
+          "range": [-10, 24]
+        },
+        "compensation": {
+          "type": "f32",
+          "doc": "Exposure compensation in stops, applied in both modes; +1 doubles the brightness.",
+          "default": 0,
+          "range": [-8, 8]
+        },
+        "minEv100": {
+          "type": "f32",
+          "doc": "Darkest exposure automatic metering may pick (lower = brighter in dark scenes).",
+          "default": -2,
+          "range": [-10, 24]
+        },
+        "maxEv100": {
+          "type": "f32",
+          "doc": "Brightest exposure automatic metering may pick.",
+          "default": 16,
+          "range": [-10, 24]
+        },
+        "adaptationSpeed": {
+          "type": "f32",
+          "doc": "How fast automatic exposure adapts, per second; higher reacts faster.",
+          "default": 2,
+          "range": [0.1, 20]
+        },
+        "toneMapping": {
+          "type": "ToneMapping",
+          "doc": "Display transform.",
+          "default": "filmic",
+          "options": [
+            "filmic",
+            "neutral",
+            "acesFit"
+          ]
+        },
+        "bloom": {
+          "type": "f32",
+          "doc": "Fraction of light spread into the bloom glow around bright pixels.",
+          "default": 0.04,
+          "range": [0, 0.25]
+        },
+        "whiteBalance": {
+          "type": "f32",
+          "doc": "White balance: the colour temperature that renders as neutral white. Lower warms the image's whites to neutral (tungsten ≈ 3200), higher cools them.",
+          "default": 6500,
+          "unit": "K",
+          "range": [1500, 15000]
+        },
+        "saturation": {
+          "type": "f32",
+          "doc": "Colour saturation; 0 is greyscale, 1 unchanged.",
+          "default": 1,
+          "range": [0, 2]
+        },
+        "contrast": {
+          "type": "f32",
+          "doc": "Contrast around middle grey; 1 unchanged.",
+          "default": 1,
+          "range": [0.5, 2]
+        },
+        "vignette": {
+          "type": "f32",
+          "doc": "Darkening toward the frame corners; 0 disables it.",
+          "default": 0,
+          "range": [0, 1]
+        }
+      }
+    },
     "PrefabInstantiateParams": {
       "kind": "params",
       "doc": "Parameters of `prefab.instantiate`.",
@@ -4866,6 +5596,47 @@ expression: out
         }
       }
     },
+    "PrimitiveMaterialOverride": {
+      "kind": "struct",
+      "doc": "One native material graph/instance replacing a selected model primitive's material.",
+      "module": "render",
+      "fields": {
+        "primitive": {
+          "type": "u32",
+          "doc": "Zero-based primitive within the selected subtree, before `primitive` filtering.",
+          "default": 0
+        },
+        "material": {
+          "type": "asset",
+          "doc": "Authoritative material graph or material-instance asset (`@path#id`).",
+          "default": null
+        }
+      }
+    },
+    "ProjectSetMainParams": {
+      "kind": "params",
+      "doc": "Parameters of `project.setMain`.",
+      "fields": {
+        "scene": {
+          "type": "asset<scene>",
+          "doc": "Existing scene path or asset reference to open when the project starts.",
+          "required": true
+        }
+      }
+    },
+    "ProjectSettings": {
+      "kind": "record",
+      "doc": "Project marker represented as a record so project changes share history and undo.",
+      "module": "core",
+      "prefix": "p",
+      "fields": {
+        "settings": {
+          "type": "json",
+          "doc": "Project settings, including fields owned by plugins and future engine versions.",
+          "default": null
+        }
+      }
+    },
     "PropertySetParams": {
       "kind": "params",
       "doc": "Parameters of `property.set`.",
@@ -4884,6 +5655,28 @@ expression: out
           "type": "json",
           "doc": "New value, in the field's schema type and unit.",
           "required": true
+        }
+      }
+    },
+    "QualitySetting": {
+      "kind": "enum",
+      "doc": "Rendering quality. `auto` picks from the GPU: High on ray-tracing GPUs (Medium below 8 GiB of video memory), Low without ray tracing. Epic is never automatic.",
+      "module": "render",
+      "variants": {
+        "auto": {
+          "doc": "Detect from the GPU."
+        },
+        "low": {
+          "doc": "Raster renderer with temporal antialiasing; no ray tracing."
+        },
+        "medium": {
+          "doc": "Raster lighting with ambient occlusion and screen-space reflections."
+        },
+        "high": {
+          "doc": "Raster lighting with stronger shadow, GI and screen-space effect budgets."
+        },
+        "epic": {
+          "doc": "The highest raster shadow, GI and reflection budgets. The most expensive."
         }
       }
     },
@@ -4943,6 +5736,30 @@ expression: out
           "type": "list<RagdollBone>",
           "doc": "Bodies in stable parent-before-child order.",
           "default": []
+        }
+      }
+    },
+    "RenderSettings": {
+      "kind": "struct",
+      "doc": "Project-wide rendering settings, stored under `rendering` in `ara.project.json`. A player's `--quality` flag overrides `quality` for that run.",
+      "module": "render",
+      "fields": {
+        "quality": {
+          "type": "QualitySetting",
+          "doc": "Default quality preset for Play, the editor's lit viewport and exported players.",
+          "default": "auto",
+          "options": [
+            "auto",
+            "low",
+            "medium",
+            "high",
+            "epic"
+          ]
+        },
+        "rayTracing": {
+          "type": "bool",
+          "doc": "Opt in to experimental hardware ray tracing for supported presets. False keeps every preset on raster and creates no ray-tracing presentation device. Takes effect when the player or editor GPU device is opened.",
+          "default": false
         }
       }
     },
@@ -5283,6 +6100,39 @@ expression: out
           "type": "list<AnimMatrix>",
           "doc": "Explicit mesh-space inverse binds, in joint order. Empty derives them from bind transforms; glTF importers preserve the skin accessor here instead.",
           "default": []
+        }
+      }
+    },
+    "SkyAtmosphere": {
+      "kind": "component",
+      "doc": "A physical sky and aerial perspective lit by the scene's directional light. The sun's elevation sets the time of day; without this component the scene uses its `Environment` gradient. The first entity in ID order wins.",
+      "module": "render",
+      "fields": {
+        "seaLevel": {
+          "type": "f32",
+          "doc": "World altitude of the planet surface (sea level); the sky and fog measure height from here.",
+          "default": 0,
+          "unit": "m",
+          "examples": [0]
+        },
+        "aerosols": {
+          "type": "f32",
+          "doc": "Aerosol (haze, dust) density relative to clear Earth air. Raise it for dusty or humid skies: a whiter horizon, a wider sun glow and stronger aerial perspective.",
+          "default": 1,
+          "range": [0, 20]
+        },
+        "cloudCoverage": {
+          "type": "f32",
+          "doc": "Fraction of the sky covered by the lit cloud layer; 0 disables clouds.",
+          "default": 0,
+          "range": [0, 1]
+        },
+        "cloudHeight": {
+          "type": "f32",
+          "doc": "Altitude of the cloud layer above sea level.",
+          "default": 2200,
+          "unit": "m",
+          "range": [500, 20000]
         }
       }
     },
@@ -5762,6 +6612,11 @@ expression: out
       "doc": "A whole gesture, including every dab; do not issue one transaction per mouse sample.",
       "module": "terrain",
       "fields": {
+        "id": {
+          "type": "option<string>",
+          "doc": "Optional concrete or symbolic stroke ID for reproducible authoring.",
+          "default": null
+        },
         "layer": {
           "type": "string",
           "doc": "Existing layer ID.",
@@ -5814,6 +6669,69 @@ expression: out
           "type": "list<string>",
           "doc": "Gesture IDs touching this tile, in transaction order.",
           "default": []
+        }
+      }
+    },
+    "TextureSettings": {
+      "kind": "struct",
+      "doc": "Declarative texture import settings.",
+      "module": "asset",
+      "fields": {
+        "usage": {
+          "type": "TextureUsage",
+          "doc": "How color/normal/mask values are interpreted.",
+          "default": "color",
+          "options": [
+            "color",
+            "linear",
+            "normal",
+            "mask",
+            "hdr"
+          ]
+        },
+        "mipmaps": {
+          "type": "bool",
+          "doc": "Generate the complete mip chain through 1×1.",
+          "default": true
+        },
+        "flipNormalY": {
+          "type": "bool",
+          "doc": "Invert normal Y for DirectX-authored tangent-space inputs.",
+          "default": false
+        },
+        "maskChannel": {
+          "type": "u8",
+          "doc": "Source channel for BC4, R=0/G=1/B=2/A=3.",
+          "default": 0,
+          "range": [0, 3]
+        },
+        "maxDimension": {
+          "type": "u32",
+          "doc": "Maximum permitted source dimension (decode limits are also enforced).",
+          "default": 16384,
+          "range": [1, 16384]
+        }
+      }
+    },
+    "TextureUsage": {
+      "kind": "enum",
+      "doc": "Semantic texture usage selects transfer functions, mip filtering and BC format.",
+      "module": "asset",
+      "variants": {
+        "color": {
+          "doc": "sRGB color (alpha remains linear), BC7 sRGB."
+        },
+        "linear": {
+          "doc": "Linear RGBA data, BC7 UNORM."
+        },
+        "normal": {
+          "doc": "Tangent-space normals, normalized mips and BC5 XY."
+        },
+        "mask": {
+          "doc": "A single linear scalar channel, BC4."
+        },
+        "hdr": {
+          "doc": "Nonnegative linear radiance, BC6H UFLOAT."
         }
       }
     },
@@ -6133,6 +7051,22 @@ expression: out
         }
       }
     },
+    "ToneMapping": {
+      "kind": "enum",
+      "doc": "The display transform that compresses scene radiance into the screen's range.",
+      "module": "render",
+      "variants": {
+        "filmic": {
+          "doc": "Filmic ACES-style curve with a soft toe and highlight desaturation, similar to Unreal's default; the most cinematic."
+        },
+        "neutral": {
+          "doc": "Khronos PBR Neutral: keeps material colours accurate up to bright highlights."
+        },
+        "acesFit": {
+          "doc": "Narkowicz's per-channel ACES fit (the legacy curve; saturated highlights)."
+        }
+      }
+    },
     "Transform": {
       "kind": "component",
       "doc": "Position, rotation and scale of an entity relative to its parent.",
@@ -6175,6 +7109,33 @@ expression: out
           "examples": [
             [2, 2, 2]
           ]
+        }
+      }
+    },
+    "TransformLookAtParams": {
+      "kind": "params",
+      "doc": "Parameters of `transform.lookAt`.",
+      "fields": {
+        "entity": {
+          "type": "entity",
+          "doc": "Camera, light or other entity whose local -Z axis should face the target.",
+          "required": true
+        },
+        "point": {
+          "type": "option<vec3>",
+          "doc": "World-space target position. Supply exactly one of point or target.",
+          "default": null,
+          "unit": "m"
+        },
+        "target": {
+          "type": "option<entity>",
+          "doc": "Target entity in this document; its world position is used.",
+          "default": null
+        },
+        "up": {
+          "type": "option<vec3>",
+          "doc": "Preferred world-space up vector; defaults to +Y. At a pole a stable perpendicular axis is used.",
+          "default": null
         }
       }
     },
@@ -6311,6 +7272,31 @@ expression: out
           "type": "map<string>",
           "doc": "Complete translated ICU patterns keyed by the requested source keys.",
           "default": {}
+        }
+      }
+    },
+    "UiSource": {
+      "kind": "record",
+      "doc": "Lossless UI source; persistence writes native XML through `SourceDocument`.",
+      "module": "ui",
+      "prefix": "us",
+      "fields": {
+        "source": {
+          "type": "string",
+          "doc": "Complete XML, including comments and stable asset identity metadata.",
+          "default": ""
+        }
+      }
+    },
+    "UiSourceApplyParams": {
+      "kind": "params",
+      "doc": "Replaces a UI document's native markup through revision-checked source ops.",
+      "module": "ui",
+      "fields": {
+        "source": {
+          "type": "string",
+          "doc": "Complete native UI XML. Existing identity metadata may be retained or omitted.",
+          "required": true
         }
       }
     },
@@ -6621,15 +7607,52 @@ expression: out
         }
       }
     },
+    "VirtualGeometrySettings": {
+      "kind": "struct",
+      "doc": "Offline cook policy; every value participates in the cache identity.",
+      "module": "geo",
+      "fields": {
+        "groupSize": {
+          "type": "u32",
+          "doc": "Desired neighboring clusters per simplification group (2..=32).",
+          "default": 8,
+          "range": [2, 32]
+        },
+        "maxLevels": {
+          "type": "u32",
+          "doc": "Maximum hierarchy depth (1..=32).",
+          "default": 24,
+          "range": [1, 32]
+        },
+        "relativeError": {
+          "type": "f32",
+          "doc": "Relative error allowed in a single reduction (0..=1).",
+          "default": 0.1,
+          "range": [0, 1]
+        }
+      }
+    },
     "VisualEffect": {
       "kind": "component",
-      "doc": "A GPU particle effect drawn at this entity. Presentation only: gameplay reads ara-vfx CPU events, never GPU particles. `effect` names a cooked library effect (`campfire`, `sparks`, `magic_swirl`, `smoke`, `muzzle_flash`, `rain`).",
+      "doc": "A GPU particle effect drawn at this entity. Presentation only: gameplay reads ara-vfx CPU events, never GPU particles. `effect` names a cooked library effect (`campfire`, `sparks`, `depth_sparks`, `magic_swirl`, `smoke`, `muzzle_flash`, `rain`, `dust`).",
       "module": "vfx",
       "fields": {
         "effect": {
           "type": "string",
           "doc": "Cooked library effect name.",
           "default": "campfire"
+        },
+        "scale": {
+          "type": "f32",
+          "doc": "Uniform size: the effect's shape, sprite sizes and speeds grow together (2 doubles a campfire's height and spread).",
+          "default": 1,
+          "range": [0.05, 50]
+        },
+        "intensity": {
+          "type": "f32",
+          "doc": "Brightness multiplier on the effect's emitted and lit colour; its opacity is unchanged. Lower it for effects that glow too hot under a scene's exposure.",
+          "default": 1,
+          "range": [0, 50]
         }
       }
     },
@@ -6758,6 +7781,15 @@ expression: out
         "GraphEditor"
       ]
     },
+    "import": {
+      "doc": "Binary source asset identity and pure importer settings.",
+      "schema": "ara://schema/import/1",
+      "idPrefix": "as",
+      "extension": "import.json",
+      "records": [
+        "ImportSettings"
+      ]
+    },
     "l10n": {
       "doc": "One locale's messages, review provenance and explicit font fallback.",
       "schema": "ara://schema/l10n/1",
@@ -6811,6 +7843,15 @@ expression: out
       ],
       "singleRoot": true
     },
+    "project": {
+      "doc": "Project startup and plugin settings; persisted as ara.project.json.",
+      "schema": "ara://schema/project/1",
+      "idPrefix": "pj",
+      "extension": "project.json",
+      "records": [
+        "ProjectSettings"
+      ]
+    },
     "scene": {
       "doc": "A level or sub-level: a flat map of entities.",
       "schema": "ara://schema/scene/1",
@@ -6832,6 +7873,15 @@ expression: out
         "TerrainTile"
       ]
     },
+    "ui": {
+      "doc": "Lossless native UI XML, edited through attributed source operations.",
+      "schema": "ara://schema/ui/1",
+      "idPrefix": "ui",
+      "extension": "ui",
+      "records": [
+        "UiSource"
+      ]
+    },
     "world": {
       "doc": "Partitioned world manifest.",
       "schema": "ara://schema/world/1",
@@ -6845,6 +7895,153 @@ expression: out
     }
   },
   "commands": {
+    "animation.clip.set": {
+      "kind": "command",
+      "summary": "Replace animation clip keys.",
+      "params": "AnimationClipSetParams",
+      "hints": {
+        "idempotent": false,
+        "destructive": false
+      },
+      "scope": "edit:scene",
+      "examples": [
+        {
+          "id": "an_idle",
+          "value": {}
+        }
+      ]
+    },
+    "animation.controller.set": {
+      "kind": "command",
+      "summary": "Replace an animation controller graph.",
+      "params": "AnimationControllerSetParams",
+      "hints": {
+        "idempotent": false,
+        "destructive": false
+      },
+      "scope": "edit:scene",
+      "examples": [
+        {
+          "id": "an_idle",
+          "value": {}
+        }
+      ]
+    },
+    "animation.create": {
+      "kind": "command",
+      "summary": "Create a typed animation skeleton, clip or controller record.",
+      "params": "AnimationCreateParams",
+      "hints": {
+        "idempotent": false,
+        "destructive": false
+      },
+      "scope": "edit:scene",
+      "examples": [
+        {
+          "id": "an_idle",
+          "asset": {
+            "name": "Idle"
+          }
+        }
+      ]
+    },
+    "animation.ik.set": {
+      "kind": "command",
+      "summary": "Replace procedural animation contact chains.",
+      "params": "AnimationIkSetParams",
+      "hints": {
+        "idempotent": false,
+        "destructive": false
+      },
+      "scope": "edit:scene",
+      "examples": [
+        {
+          "id": "an_idle",
+          "value": {}
+        }
+      ]
+    },
+    "animation.motionDatabase.set": {
+      "kind": "command",
+      "summary": "Replace pose-search database configuration.",
+      "params": "AnimationMotionDatabaseSetParams",
+      "hints": {
+        "idempotent": false,
+        "destructive": false
+      },
+      "scope": "edit:scene",
+      "examples": [
+        {
+          "id": "an_idle",
+          "value": {}
+        }
+      ]
+    },
+    "animation.property.set": {
+      "kind": "command",
+      "summary": "Set or reset a schema-addressed animation field.",
+      "params": "AnimationPropertySetParams",
+      "hints": {
+        "idempotent": false,
+        "destructive": false
+      },
+      "scope": "edit:scene",
+      "examples": [
+        {
+          "id": "an_idle",
+          "path": "name",
+          "value": "Rest"
+        }
+      ]
+    },
+    "animation.ragdoll.set": {
+      "kind": "command",
+      "summary": "Replace a physical animation ragdoll profile.",
+      "params": "AnimationRagdollSetParams",
+      "hints": {
+        "idempotent": false,
+        "destructive": false
+      },
+      "scope": "edit:scene",
+      "examples": [
+        {
+          "id": "an_idle",
+          "value": {}
+        }
+      ]
+    },
+    "animation.rig.set": {
+      "kind": "command",
+      "summary": "Replace semantic humanoid bone bindings.",
+      "params": "AnimationRigSetParams",
+      "hints": {
+        "idempotent": false,
+        "destructive": false
+      },
+      "scope": "edit:scene",
+      "examples": [
+        {
+          "id": "an_idle",
+          "value": {}
+        }
+      ]
+    },
+    "animation.skeleton.set": {
+      "kind": "command",
+      "summary": "Replace animation skeleton source.",
+      "params": "AnimationSkeletonSetParams",
+      "hints": {
+        "idempotent": false,
+        "destructive": false
+      },
+      "scope": "edit:scene",
+      "examples": [
+        {
+          "id": "an_idle",
+          "value": {}
+        }
+      ]
+    },
     "audiograph.input.set": {
       "kind": "command",
       "summary": "Wire or set one audio graph input (or graph output) to a literal or another node.",
@@ -7092,6 +8289,37 @@ expression: out
         }
       ]
     },
+    "doc.create": {
+      "kind": "command",
+      "summary": "Create a canonical empty scene, prefab or other registered document.",
+      "params": "DocCreateParams",
+      "hints": {
+        "idempotent": false,
+        "destructive": false
+      },
+      "scope": "edit:scene",
+      "examples": [
+        {
+          "path": "levels/arena.scene",
+          "id": "sc_arena001"
+        }
+      ]
+    },
+    "doc.delete": {
+      "kind": "command",
+      "summary": "Delete a loaded document and its records with history and undo.",
+      "params": "DocDeleteParams",
+      "hints": {
+        "idempotent": false,
+        "destructive": true
+      },
+      "scope": "edit:scene",
+      "examples": [
+        {
+          "document": "@levels/old.scene#sc_old001"
+        }
+      ]
+    },
     "entity.create": {
       "kind": "command",
       "summary": "Create an entity, optionally with a parent, a position among its siblings and components.",
@@ -7284,6 +8512,40 @@ expression: out
             "scale": [0.8, 1.2],
             "enabled": true
           }
+        }
+      ]
+    },
+    "import.configure": {
+      "kind": "command",
+      "summary": "Configure a source's import settings and refresh its installed importer version.",
+      "params": "ImportConfigureParams",
+      "hints": {
+        "idempotent": false,
+        "destructive": false
+      },
+      "scope": "edit:scene",
+      "examples": [
+        {
+          "source": "models/crate.glb",
+          "settings": {
+            "lodCount": 3
+          }
+        }
+      ]
+    },
+    "import.initialize": {
+      "kind": "command",
+      "summary": "Create an import sidecar with automatic importer selection and installed version.",
+      "params": "ImportInitializeParams",
+      "hints": {
+        "idempotent": false,
+        "destructive": false
+      },
+      "scope": "edit:scene",
+      "examples": [
+        {
+          "source": "models/crate.glb",
+          "id": "as_crate"
         }
       ]
     },
@@ -7565,6 +8827,97 @@ expression: out
         }
       ]
     },
+    "music.segment.set": {
+      "kind": "command",
+      "summary": "Create or replace a music segment with stems and tempo map.",
+      "params": "MusicSegmentSetParams",
+      "hints": {
+        "idempotent": false,
+        "destructive": false
+      },
+      "scope": "edit:scene",
+      "examples": [
+        {
+          "id": "sg_ambient",
+          "segment": {
+            "name": "Ambient"
+          }
+        }
+      ]
+    },
+    "music.settings.set": {
+      "kind": "command",
+      "summary": "Set the music's initial segment, intensity, fade and seed.",
+      "params": "MusicSettingsSetParams",
+      "hints": {
+        "idempotent": false,
+        "destructive": false
+      },
+      "scope": "edit:scene",
+      "examples": [
+        {
+          "settings": {
+            "initial": "Ambient"
+          }
+        }
+      ]
+    },
+    "music.stinger.set": {
+      "kind": "command",
+      "summary": "Create or replace a grid-aligned music stinger.",
+      "params": "MusicStingerSetParams",
+      "hints": {
+        "idempotent": false,
+        "destructive": false
+      },
+      "scope": "edit:scene",
+      "examples": [
+        {
+          "stinger": {
+            "name": "Discovery"
+          }
+        }
+      ]
+    },
+    "music.transition.set": {
+      "kind": "command",
+      "summary": "Create or replace a synchronized music transition.",
+      "params": "MusicTransitionSetParams",
+      "hints": {
+        "idempotent": false,
+        "destructive": false
+      },
+      "scope": "edit:scene",
+      "examples": [
+        {
+          "transition": {
+            "to": "Combat",
+            "sync": "bar"
+          }
+        }
+      ]
+    },
+    "physics.collider.fromModel": {
+      "kind": "command",
+      "summary": "Derive convex or static mesh collision from cooked model geometry.",
+      "params": "ColliderFromModelParams",
+      "hints": {
+        "idempotent": false,
+        "destructive": false
+      },
+      "scope": "edit:scene",
+      "examples": [
+        {
+          "entity": "e_crate",
+          "mode": "convex"
+        },
+        {
+          "entity": "e_wall",
+          "mode": "mesh",
+          "center": [0, 0.5, 0]
+        }
+      ]
+    },
     "physics2d.set": {
       "kind": "command",
       "summary": "Set a validated 2D rigid body (body + collider) or capsule character, with its pose.",
@@ -7648,6 +9001,21 @@ expression: out
           "entity": "e_4f9a/e_m4tz",
           "path": "MeshRenderer.tint",
           "value": [1, 0, 0, 1]
+        }
+      ]
+    },
+    "project.setMain": {
+      "kind": "command",
+      "summary": "Set ara.project.json's startup scene with history and undo.",
+      "params": "ProjectSetMainParams",
+      "hints": {
+        "idempotent": false,
+        "destructive": false
+      },
+      "scope": "edit:scene",
+      "examples": [
+        {
+          "scene": "@levels/arena.scene#sc_arena001"
         }
       ]
     },
@@ -8016,6 +9384,23 @@ expression: out
         }
       ]
     },
+    "transform.lookAt": {
+      "kind": "command",
+      "summary": "Aim local -Z at a world point or entity with a preferred world up vector.",
+      "params": "TransformLookAtParams",
+      "hints": {
+        "idempotent": true,
+        "destructive": false
+      },
+      "scope": "edit:scene",
+      "examples": [
+        {
+          "entity": "e_camera",
+          "point": [0, 1, 0],
+          "up": [0, 1, 0]
+        }
+      ]
+    },
     "transform.set": {
       "kind": "command",
       "summary": "Set the local position, rotation and/or scale of entities.",
@@ -8032,6 +9417,21 @@ expression: out
           ],
           "position": [2, 0, 3],
           "rotation": [0, 45, 0]
+        }
+      ]
+    },
+    "ui.source.apply": {
+      "kind": "command",
+      "summary": "Apply lossless native UI markup with validation, attribution and undo.",
+      "params": "UiSourceApplyParams",
+      "hints": {
+        "idempotent": false,
+        "destructive": false
+      },
+      "scope": "edit:scene",
+      "examples": [
+        {
+          "source": "<ui id=\"hud\"><text id=\"title\" text=\"Hello\" /></ui>\n"
         }
       ]
     },
@@ -8084,7 +9484,7 @@ expression: out
       "scope": "edit:scene",
       "examples": [
         {
-          "source": "{\n  \"name\": \"campfire\",\n  \"seed\": 17,\n  \"hz\": 60,\n  \"quality\": {\n    \"particles\": 1000000,\n    \"overdraw\": 16,\n    \"lights\": 8,\n    \"events\": 4096\n  },\n  \"emitters\": [\n    {\n      \"name\": \"flame\",\n      \"capacity\": 512,\n      \"bounds\": {\n        \"min\": [-8, -2, -8],\n        \"max\": [8, 12, 8]\n      },\n      \"stacks\": {\n        \"spawn\": [\n          {\n            \"name\": \"rate\",\n            \"module\": {\n              \"op\": \"rate\",\n              \"per_second\": 65\n            }\n          }\n        ],\n        \"initialize\": [\n          {\n            \"name\": \"lifetime\",\n            \"module\": {\n              \"op\": \"lifetime\",\n              \"seconds\": 1.25,\n              \"size\": 0.42,\n              \"color\": [5, 0.6, 0.03, 0.5]\n            }\n          },\n          {\n            \"name\": \"hearth\",\n            \"module\": {\n              \"op\": \"sphere\",\n              \"center\": [0, 0.2, 0],\n              \"radius\": 0.22\n            }\n          },\n          {\n            \"name\": \"rise\",\n            \"module\": {\n              \"op\": \"velocity\",\n              \"value\": [0, 1.15, 0],\n              \"spread\": [0.15, 0.2, 0.15]\n            }\n          }\n        ],\n        \"update\": [\n          {\n            \"name\": \"curl\",\n            \"module\": {\n              \"op\": \"curl_noise\",\n              \"frequency\": 3,\n              \"strength\": 0.65\n            }\n          },\n          {\n            \"name\": \"drag\",\n            \"module\": {\n              \"op\": \"drag\",\n              \"coefficient\": 0.6\n            }\n          },\n          {\n            \"name\": \"fade\",\n            \"module\": {\n              \"op\": \"color_over_life\",\n              \"keys\": [\n                {\n                  \"t\": 0,\n                  \"value\": [5, 2, 0.4, 0]\n                },\n                {\n                  \"t\": 0.15,\n                  \"value\": [4, 1.5, 0.25, 0.65]\n                },\n                {\n                  \"t\": 0.65,\n                  \"value\": [3, 0.6, 0.04, 0.5]\n                },\n                {\n                  \"t\": 1,\n                  \"value\": [0.5, 0.03, 0, 0]\n                }\n              ]\n            }\n          },\n          {\n            \"name\": \"shrink\",\n            \"module\": {\n              \"op\": \"size_over_life\",\n              \"keys\": [\n                {\n                  \"t\": 0,\n                  \"value\": 0.36\n                },\n                {\n                  \"t\": 0.4,\n                  \"value\": 0.48\n                },\n                {\n                  \"t\": 1,\n                  \"value\": 0.12\n                }\n              ]\n            }\n          }\n        ],\n        \"render\": [\n          {\n            \"name\": \"sprite\",\n            \"module\": {\n              \"op\": \"sprite\",\n              \"domain\": \"unlit\",\n              \"soft_distance\": 0.15,\n              \"sorting\": \"none\"\n            }\n          },\n          {\n            \"name\": \"appearance\",\n            \"module\": {\n              \"op\": \"appearance\",\n              \"texture\": \"fire\",\n              \"blend\": \"additive\",\n              \"alignment\": \"camera\",\n              \"stretch\": 1,\n              \"shutter\": 0\n            }\n          },\n          {\n            \"name\": \"flipbook\",\n            \"module\": {\n              \"op\": \"flipbook\",\n              \"grid\": [4, 4],\n              \"fps\": 16\n            }\n          },\n          {\n            \"name\": \"hearth_light\",\n            \"module\": {\n              \"op\": \"light\",\n              \"color\": [1, 0.32, 0.055],\n              \"lumens\": 650,\n              \"radius\": 4\n            }\n          }\n        ]\n      }\n    },\n    {\n      \"name\": \"smoke\",\n      \"capacity\": 2048,\n      \"bounds\": {\n        \"min\": [-8, -2, -8],\n        \"max\": [8, 12, 8]\n      },\n      \"stacks\": {\n        \"spawn\": [\n          {\n            \"name\": \"rate\",\n            \"module\": {\n              \"op\": \"rate\",\n              \"per_second\": 16\n            }\n          }\n        ],\n        \"initialize\": [\n          {\n            \"name\": \"lifetime\",\n            \"module\": {\n              \"op\": \"lifetime\",\n              \"seconds\": 4,\n              \"size\": 0.45,\n              \"color\": [0.2, 0.23, 0.28, 0.14]\n            }\n          },\n          {\n            \"name\": \"source\",\n            \"module\": {\n              \"op\": \"cone\",\n              \"origin\": [0, 0.1, 0],\n              \"height\": 0.4,\n              \"radius\": 0.3\n            }\n          },\n          {\n            \"name\": \"rise\",\n            \"module\": {\n              \"op\": \"velocity\",\n              \"value\": [0, 0.8, 0],\n              \"spread\": [0.15, 0.2, 0.15]\n            }\n          }\n        ],\n        \"update\": [\n          {\n            \"name\": \"curl\",\n            \"module\": {\n              \"op\": \"curl_noise\",\n              \"frequency\": 1.5,\n              \"strength\": 0.45\n            }\n          },\n          {\n            \"name\": \"grow\",\n            \"module\": {\n              \"op\": \"size_over_life\",\n              \"keys\": [\n                {\n                  \"t\": 0,\n                  \"value\": 0.45\n                },\n                {\n                  \"t\": 1,\n                  \"value\": 1.5\n                }\n              ]\n            }\n          },\n          {\n            \"name\": \"fade\",\n            \"module\": {\n              \"op\": \"color_over_life\",\n              \"keys\": [\n                {\n                  \"t\": 0,\n                  \"value\": [0.35, 0.39, 0.44, 0]\n                },\n                {\n                  \"t\": 0.15,\n                  \"value\": [0.55, 0.58, 0.63, 0.55]\n                },\n                {\n                  \"t\": 0.75,\n                  \"value\": [0.55, 0.58, 0.63, 0.2]\n                },\n                {\n                  \"t\": 1,\n                  \"value\": [0.55, 0.58, 0.63, 0]\n                }\n              ]\n            }\n          }\n        ],\n        \"render\": [\n          {\n            \"name\": \"sprite\",\n            \"module\": {\n              \"op\": \"sprite\",\n              \"domain\": \"surface\",\n              \"soft_distance\": 0.3,\n              \"sorting\": \"depth\"\n            }\n          },\n          {\n            \"name\": \"appearance\",\n            \"module\": {\n              \"op\": \"appearance\",\n              \"texture\": \"smoke\",\n              \"blend\": \"alpha\",\n              \"alignment\": \"camera\",\n              \"stretch\": 1,\n              \"shutter\": 0\n            }\n          },\n          {\n            \"name\": \"flipbook\",\n            \"module\": {\n              \"op\": \"flipbook\",\n              \"grid\": [4, 4],\n              \"fps\": 16\n            }\n          }\n        ]\n      }\n    },\n    {\n      \"name\": \"embers\",\n      \"capacity\": 4096,\n      \"bounds\": {\n        \"min\": [-8, -2, -8],\n        \"max\": [8, 12, 8]\n      },\n      \"stacks\": {\n        \"spawn\": [\n          {\n            \"name\": \"rate\",\n            \"module\": {\n              \"op\": \"rate\",\n              \"per_second\": 18\n            }\n          }\n        ],\n        \"initialize\": [\n          {\n            \"name\": \"lifetime\",\n            \"module\": {\n              \"op\": \"lifetime\",\n              \"seconds\": 2,\n              \"size\": 0.012,\n              \"color\": [14, 4.5, 0.7, 0.85]\n            }\n          },\n          {\n            \"name\": \"source\",\n            \"module\": {\n              \"op\": \"point\",\n              \"position\": [0, 0.7, 0]\n            }\n          },\n          {\n            \"name\": \"spray\",\n            \"module\": {\n              \"op\": \"velocity\",\n              \"value\": [0, 2, 0],\n              \"spread\": [0.4, 0.7, 0.4]\n            }\n          }\n        ],\n        \"update\": [\n          {\n            \"name\": \"gravity\",\n            \"module\": {\n              \"op\": \"gravity\",\n              \"acceleration\": [0, -9.81, 0]\n            }\n          },\n          {\n            \"name\": \"floor\",\n            \"module\": {\n              \"op\": \"plane_collision\",\n              \"normal\": [0, 1, 0],\n              \"offset\": 0,\n              \"restitution\": 0.6\n            }\n          },\n          {\n            \"name\": \"cool\",\n            \"module\": {\n              \"op\": \"color_over_life\",\n              \"keys\": [\n                {\n                  \"t\": 0,\n                  \"value\": [18, 8, 2, 1]\n                },\n                {\n                  \"t\": 0.5,\n                  \"value\": [9, 1.8, 0.1, 0.8]\n                },\n                {\n                  \"t\": 1,\n                  \"value\": [1, 0.05, 0, 0]\n                }\n              ]\n            }\n          }\n        ],\n        \"render\": [\n          {\n            \"name\": \"sprite\",\n            \"module\": {\n              \"op\": \"sprite\",\n              \"domain\": \"unlit\",\n              \"soft_distance\": 0.15,\n              \"sorting\": \"none\"\n            }\n          },\n          {\n            \"name\": \"appearance\",\n            \"module\": {\n              \"op\": \"appearance\",\n              \"texture\": \"spark\",\n              \"blend\": \"additive\",\n              \"alignment\": \"velocity\",\n              \"stretch\": 3,\n              \"shutter\": 0.85\n            }\n          },\n          {\n            \"name\": \"flipbook\",\n            \"module\": {\n              \"op\": \"flipbook\",\n              \"grid\": [4, 4],\n              \"fps\": 16\n            }\n          }\n        ]\n      }\n    }\n  ]\n}\n"
+          "source": "{\n  \"name\": \"campfire\",\n  \"seed\": 17,\n  \"hz\": 60,\n  \"quality\": {\n    \"particles\": 1000000,\n    \"overdraw\": 16,\n    \"lights\": 8,\n    \"events\": 4096\n  },\n  \"emitters\": [\n    {\n      \"name\": \"flame\",\n      \"capacity\": 512,\n      \"bounds\": {\n        \"min\": [-8, -2, -8],\n        \"max\": [8, 12, 8]\n      },\n      \"stacks\": {\n        \"spawn\": [\n          {\n            \"name\": \"rate\",\n            \"module\": {\n              \"op\": \"rate\",\n              \"per_second\": 80\n            }\n          }\n        ],\n        \"initialize\": [\n          {\n            \"name\": \"lifetime\",\n            \"module\": {\n              \"op\": \"lifetime\",\n              \"seconds\": 0.85,\n              \"size\": 0.3,\n              \"color\": [5, 0.6, 0.03, 0.5]\n            }\n          },\n          {\n            \"name\": \"hearth\",\n            \"module\": {\n              \"op\": \"sphere\",\n              \"center\": [0, 0.12, 0],\n              \"radius\": 0.2\n            }\n          },\n          {\n            \"name\": \"rise\",\n            \"module\": {\n              \"op\": \"velocity\",\n              \"value\": [0, 0.95, 0],\n              \"spread\": [0.12, 0.2, 0.12]\n            }\n          }\n        ],\n        \"update\": [\n          {\n            \"name\": \"curl\",\n            \"module\": {\n              \"op\": \"curl_noise\",\n              \"frequency\": 3,\n              \"strength\": 0.55\n            }\n          },\n          {\n            \"name\": \"drag\",\n            \"module\": {\n              \"op\": \"drag\",\n              \"coefficient\": 0.6\n            }\n          },\n          {\n            \"name\": \"fade\",\n            \"module\": {\n              \"op\": \"color_over_life\",\n              \"keys\": [\n                {\n                  \"t\": 0,\n                  \"value\": [4, 1.6, 0.35, 0]\n                },\n                {\n                  \"t\": 0.1,\n                  \"value\": [4, 1.5, 0.25, 0.75]\n                },\n                {\n                  \"t\": 0.55,\n                  \"value\": [2.6, 0.65, 0.06, 0.5]\n                },\n                {\n                  \"t\": 1,\n                  \"value\": [0.4, 0.04, 0, 0]\n                }\n              ]\n            }\n          },\n          {\n            \"name\": \"shrink\",\n            \"module\": {\n              \"op\": \"size_over_life\",\n              \"keys\": [\n                {\n                  \"t\": 0,\n                  \"value\": 0.24\n                },\n                {\n                  \"t\": 0.35,\n                  \"value\": 0.34\n                },\n                {\n                  \"t\": 1,\n                  \"value\": 0.08\n                }\n              ]\n            }\n          }\n        ],\n        \"render\": [\n          {\n            \"name\": \"sprite\",\n            \"module\": {\n              \"op\": \"sprite\",\n              \"domain\": \"unlit\",\n              \"soft_distance\": 0.15,\n              \"sorting\": \"none\"\n            }\n          },\n          {\n            \"name\": \"appearance\",\n            \"module\": {\n              \"op\": \"appearance\",\n              \"texture\": \"fire\",\n              \"blend\": \"additive\",\n              \"alignment\": \"camera\",\n              \"stretch\": 1,\n              \"shutter\": 0\n            }\n          },\n          {\n            \"name\": \"flipbook\",\n            \"module\": {\n              \"op\": \"flipbook\",\n              \"grid\": [4, 4],\n              \"fps\": 16\n            }\n          },\n          {\n            \"name\": \"hearth_light\",\n            \"module\": {\n              \"op\": \"light\",\n              \"color\": [1, 0.32, 0.055],\n              \"lumens\": 900,\n              \"radius\": 6\n            }\n          }\n        ]\n      }\n    },\n    {\n      \"name\": \"smoke\",\n      \"capacity\": 2048,\n      \"bounds\": {\n        \"min\": [-8, -2, -8],\n        \"max\": [8, 12, 8]\n      },\n      \"stacks\": {\n        \"spawn\": [\n          {\n            \"name\": \"rate\",\n            \"module\": {\n              \"op\": \"rate\",\n              \"per_second\": 12\n            }\n          }\n        ],\n        \"initialize\": [\n          {\n            \"name\": \"lifetime\",\n            \"module\": {\n              \"op\": \"lifetime\",\n              \"seconds\": 4.5,\n              \"size\": 0.45,\n              \"color\": [0.2, 0.23, 0.28, 0.14]\n            }\n          },\n          {\n            \"name\": \"source\",\n            \"module\": {\n              \"op\": \"cone\",\n              \"origin\": [0, 0.55, 0],\n              \"height\": 0.2,\n              \"radius\": 0.12\n            }\n          },\n          {\n            \"name\": \"rise\",\n            \"module\": {\n              \"op\": \"velocity\",\n              \"value\": [0, 0.55, 0],\n              \"spread\": [0.12, 0.15, 0.12]\n            }\n          }\n        ],\n        \"update\": [\n          {\n            \"name\": \"curl\",\n            \"module\": {\n              \"op\": \"curl_noise\",\n              \"frequency\": 1.2,\n              \"strength\": 0.35\n            }\n          },\n          {\n            \"name\": \"grow\",\n            \"module\": {\n              \"op\": \"size_over_life\",\n              \"keys\": [\n                {\n                  \"t\": 0,\n                  \"value\": 0.25\n                },\n                {\n                  \"t\": 1,\n                  \"value\": 1\n                }\n              ]\n            }\n          },\n          {\n            \"name\": \"fade\",\n            \"module\": {\n              \"op\": \"color_over_life\",\n              \"keys\": [\n                {\n                  \"t\": 0,\n                  \"value\": [0.1, 0.095, 0.09, 0]\n                },\n                {\n                  \"t\": 0.15,\n                  \"value\": [0.12, 0.115, 0.11, 0.2]\n                },\n                {\n                  \"t\": 0.6,\n                  \"value\": [0.16, 0.16, 0.16, 0.11]\n                },\n                {\n                  \"t\": 1,\n                  \"value\": [0.2, 0.2, 0.2, 0]\n                }\n              ]\n            }\n          }\n        ],\n        \"render\": [\n          {\n            \"name\": \"sprite\",\n            \"module\": {\n              \"op\": \"sprite\",\n              \"domain\": \"surface\",\n              \"soft_distance\": 0.3,\n              \"sorting\": \"depth\"\n            }\n          },\n          {\n            \"name\": \"appearance\",\n            \"module\": {\n              \"op\": \"appearance\",\n              \"texture\": \"smoke\",\n              \"blend\": \"alpha\",\n              \"alignment\": \"camera\",\n              \"stretch\": 1,\n              \"shutter\": 0\n            }\n          },\n          {\n            \"name\": \"flipbook\",\n            \"module\": {\n              \"op\": \"flipbook\",\n              \"grid\": [4, 4],\n              \"fps\": 16\n            }\n          }\n        ]\n      }\n    },\n    {\n      \"name\": \"embers\",\n      \"capacity\": 4096,\n      \"bounds\": {\n        \"min\": [-8, -2, -8],\n        \"max\": [8, 12, 8]\n      },\n      \"stacks\": {\n        \"spawn\": [\n          {\n            \"name\": \"rate\",\n            \"module\": {\n              \"op\": \"rate\",\n              \"per_second\": 12\n            }\n          }\n        ],\n        \"initialize\": [\n          {\n            \"name\": \"lifetime\",\n            \"module\": {\n              \"op\": \"lifetime\",\n              \"seconds\": 2,\n              \"size\": 0.012,\n              \"color\": [14, 4.5, 0.7, 0.85]\n            }\n          },\n          {\n            \"name\": \"source\",\n            \"module\": {\n              \"op\": \"point\",\n              \"position\": [0, 0.7, 0]\n            }\n          },\n          {\n            \"name\": \"spray\",\n            \"module\": {\n              \"op\": \"velocity\",\n              \"value\": [0, 2, 0],\n              \"spread\": [0.4, 0.7, 0.4]\n            }\n          }\n        ],\n        \"update\": [\n          {\n            \"name\": \"gravity\",\n            \"module\": {\n              \"op\": \"gravity\",\n              \"acceleration\": [0, -9.81, 0]\n            }\n          },\n          {\n            \"name\": \"floor\",\n            \"module\": {\n              \"op\": \"plane_collision\",\n              \"normal\": [0, 1, 0],\n              \"offset\": 0,\n              \"restitution\": 0.6\n            }\n          },\n          {\n            \"name\": \"cool\",\n            \"module\": {\n              \"op\": \"color_over_life\",\n              \"keys\": [\n                {\n                  \"t\": 0,\n                  \"value\": [18, 8, 2, 1]\n                },\n                {\n                  \"t\": 0.5,\n                  \"value\": [9, 1.8, 0.1, 0.8]\n                },\n                {\n                  \"t\": 1,\n                  \"value\": [1, 0.05, 0, 0]\n                }\n              ]\n            }\n          }\n        ],\n        \"render\": [\n          {\n            \"name\": \"sprite\",\n            \"module\": {\n              \"op\": \"sprite\",\n              \"domain\": \"unlit\",\n              \"soft_distance\": 0.15,\n              \"sorting\": \"none\"\n            }\n          },\n          {\n            \"name\": \"appearance\",\n            \"module\": {\n              \"op\": \"appearance\",\n              \"texture\": \"spark\",\n              \"blend\": \"additive\",\n              \"alignment\": \"velocity\",\n              \"stretch\": 3,\n              \"shutter\": 0.85\n            }\n          },\n          {\n            \"name\": \"flipbook\",\n            \"module\": {\n              \"op\": \"flipbook\",\n              \"grid\": [4, 4],\n              \"fps\": 16\n            }\n          }\n        ]\n      }\n    }\n  ]\n}\n"
         }
       ]
     }

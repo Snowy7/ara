@@ -60,6 +60,14 @@ reports/         HTML reports published to Snist
 - `cargo clippy -p <crate> --all-targets`: no new warnings.
 - `cargo test -p <crate>`: tests for the crates you touched.
 - `cargo fmt --all`
+- Performance inner loop: `cargo run -p ara-dev -- perf` plus touched-crate checks/tests. Shader/live controls: `docs/dev/ara-dev.md`.
+- **Agent checkpoints are focused:** `cargo fmt`, `cargo clippy -p <changed crates> --all-targets -D warnings`, `cargo test -p <changed crates>`, plus the specific GPU/player/editor suites your change touches. Commit and hand over the SHA when these pass; set `CARGO_BUILD_JOBS=2` on this shared PC.
+- **The integration gate** (`cargo run -p ara-dev -- check`, with `--base <ref>`, `--json`, explicit `--known-failures <file>`) runs once per merge batch on main, by the integrator. Agents don't run it at checkpoints; breaks it finds go back to the owning agent.
+- Fast Windows entry: `.\crates\ara-dev\run.ps1 cargo -- <focused cargo args>`; opt into shared intermediates with `ARA_SHARED_BUILD_DIR` (see `docs/dev/ara-dev.md`). `check --plan --json` previews compile/test sets; `--no-compiler-cache` bypasses the optional wrapper.
+- Build/run editors through `ara-dev cargo -- build/run -p ara-editor`: it builds the matching player with the same roots/profile/target/features, verifies `--ray-tracing`, and refuses stale companions before launch.
+- Integrate: `cargo run -p ara-dev -- merge <branch>` (`--push` opts in; `--full` for nightly gates).
+- Wrap GPU benchmarks and timing runs with `ara-dev gpu --` (via `cargo run -p ara-dev -- gpu -- <command>`); normal GPU unit tests stay unwrapped.
+- Disk: `cargo run -p ara-dev -- disk`; `clean-worktrees` previews merged, stale targets (`--yes` deletes; never the current/dirty worktree). See `docs/dev/ara-dev.md`.
 
 Dev builds carry no debug info, to save disk. Set `CARGO_PROFILE_DEV_DEBUG=line-tables-only` when you need symbolized backtraces or a debugger.
 
@@ -86,6 +94,9 @@ There is no CI (D9). These local commands are the only gates, so run them before
 - **No exact `=` version pins in crate manifests.** Use caret ranges (`"1.8"`); `Cargo.lock` pins the exact versions. Exact pins in two crates conflict as soon as both are in the workspace. Shared dependencies are moving to root `[workspace.dependencies]`; ask the parent before adding a new one there.
 - **Every diagnostic code has a catalog entry** in `crates/ara-diag/codes/` (cause, fixes, owner). That includes `ARA####`, `ARA-EXP-*` and `ARA_GPU_*` codes. Run `cargo test -p ara-diag --test coverage` whenever you add a code; it also rejects number collisions.
 - **Tests never write tracked files.** Captures, measurements and goldens produced by tests go under `target/`. Checked-in measurements and goldens are updated only by an explicit opt-in (an env var or a dedicated bench/example), so `cargo test` leaves the tree clean.
+- **Tests never touch the real user profile.** The tracked `.cargo/config.toml` points `ARA_CONFIG_DIR` and `ARA_CRASH_DIR` under `target/` for every `cargo run`/`cargo test`; verify routes and captures use a fresh per-run profile.
+- **Cooked shaders are re-cooked, never merged.** When a merge touches Slang sources or `cooked/` artifacts, resolve the sources, then rerun `ara-shader-cook` for every affected `pipelines.json`. Never resolve a cooked-artifact conflict by picking one side.
+- **Merge, don't cherry-pick, across agent branches.** Bring another branch's work in with a real `git merge` so commits keep their identity; copied patches conflict at integration.
 - **Keep crates and files small**, split along real dependency boundaries. Each crate has an `AGENTS.md` of 150 lines or fewer: purpose, public API, how to test, gotchas.
 - **Comments:** short doc comments on types and functions explaining how they are used. Update them whenever you change the behaviour.
 - **Spikes:** `spikes/<id>-<name>/`, own `Cargo.toml` (not a workspace member), throwaway. They finish with `RESULT.md` (numbers, findings, recommendation) and an entry in `docs/decisions.md`.

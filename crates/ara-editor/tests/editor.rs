@@ -129,7 +129,7 @@ fn native_hierarchy_inspector_gesture_and_author_undo_share_the_authority() {
 }
 
 #[test]
-fn mcp_actions_agent_review_provenance_and_revert_are_live() {
+fn mcp_agent_edits_apply_at_once_with_attribution_and_turn_undo() {
     let project = Project::new();
     let mut editor = project.open();
     let mut mcp = ara_mcp::Adapter::new();
@@ -160,6 +160,8 @@ fn mcp_actions_agent_review_provenance_and_revert_are_live() {
     editor
         .action("editor.focus", json!({"panel":"agents"}))
         .unwrap();
+    // The window observes agent history at its frame boundary.
+    editor.tick();
     let mut shell = Shell::new(&mut editor, [1440., 900.]).unwrap();
     assert!(shell.ui.find(&format!("turn-{txn}")).is_some());
     assert_eq!(
@@ -168,7 +170,7 @@ fn mcp_actions_agent_review_provenance_and_revert_are_live() {
     );
     let mut clipboard = MemoryClipboard::default();
     shell
-        .click(&format!("revert-{txn}"), &mut clipboard)
+        .click(&format!("turn-{txn}-undo"), &mut clipboard)
         .unwrap();
     shell.dispatch(&mut editor).unwrap();
     assert_eq!(x(&editor), 0.);
@@ -311,7 +313,7 @@ fn layout_persistence_units_and_multi_edit_are_validated() {
 }
 
 #[test]
-fn agent_presence_does_not_take_the_human_camera_and_deleted_records_remain_reviewable() {
+fn agent_presence_does_not_take_the_human_camera_and_agent_deletes_apply_with_turn_undo() {
     let project = Project::new();
     let mut editor = project.open();
     editor
@@ -342,22 +344,47 @@ fn agent_presence_does_not_take_the_human_camera_and_deleted_records_remain_revi
     assert_eq!(editor.state.camera, human);
     assert_eq!(editor.state.selection, ["e_child001"]);
     assert_eq!(editor.state.presence[&agent].selection, ["e_crate001"]);
+    // The human is told what the agent looks at, with View/Follow; nothing moves.
+    assert!(editor.activity.notices().iter().any(|n| {
+        n.text == "Presence is viewing main.scene · Salvage crate"
+            && n.kind
+                == ara_editor::activity::NoticeKind::AgentView {
+                    agent: agent.clone(),
+                }
+    }));
     editor
         .action("editor.follow", json!({"agent":agent}))
         .unwrap();
     assert_eq!(editor.state.camera.distance, 6.);
     editor.action("editor.follow", json!({})).unwrap();
     let result=Endpoint::call(&mut editor,"cmd.apply",json!({"session":agent,"doc":"sc_test0001","why":"Remove obsolete crate","commands":[{"cmd":"entity.delete","args":{"entities":["e_crate001"]}}]})).unwrap();
+    // D24: the delete just applies (no reviewable ghost); the turn can be undone.
     let view = editor.view().unwrap();
     assert!(view.entities().is_empty());
-    let scene = view.scene(&project.0, &editor.state, None).unwrap();
-    assert_eq!(scene.meshes.len(), 1);
-    assert!(scene.meshes[0].name.contains("deleted"));
-    assert_eq!(scene.materials[scene.meshes[0].material].flags[0], 2);
+    let scene = view
+        .scene(
+            &project.0,
+            &editor.state,
+            None,
+            &mut ara_editor::world::ModelCache::new(&project.0).unwrap(),
+        )
+        .unwrap();
+    assert!(
+        !scene.meshes.iter().any(|m| m.name.contains("deleted")),
+        "{:?}",
+        scene.meshes.iter().map(|m| &m.name).collect::<Vec<_>>()
+    );
+    editor.tick();
+    assert!(!editor.agent_tints().is_empty(), "the agent's turn glows");
     editor
         .action("review.revert", json!({"txn":result["txn"]}))
         .unwrap();
     assert_eq!(editor.view().unwrap().entities().len(), 2);
+    editor.tick();
+    assert!(
+        editor.agent_tints().is_empty(),
+        "an undone turn stops glowing"
+    );
 }
 
 #[test]
@@ -432,7 +459,13 @@ fn hierarchy_100k_keeps_a_bounded_row_pool_and_reaches_the_last_entity() {
     eprintln!(
         "100k hierarchy: build {build_ms:.3} ms; scroll {scroll_ms:.3} ms; {node_count} retained nodes"
     );
-    let output = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("evidence/hierarchy-100k.json");
+    // Tests never write tracked files: the checked-in measurement changes only on
+    // request (ARA_EDITOR_UPDATE_EVIDENCE=1).
+    let output = if std::env::var_os("ARA_EDITOR_UPDATE_EVIDENCE").is_some_and(|v| v == "1") {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("evidence/hierarchy-100k.json")
+    } else {
+        PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("hierarchy-100k.json")
+    };
     std::fs::create_dir_all(output.parent().unwrap()).unwrap();
     write(
         &output,
@@ -520,7 +553,7 @@ fn import_settings_are_typed_attributed_and_undoable() {
         editor.host.store().workspace().path_of(&doc),
         Some("paint.png.import.json")
     );
-    editor.apply_to(&doc,vec![json!({"cmd":"editor.import.settings","args":{"settings":{"usage":"normal","mipmaps":false},"preset":"balanced"}})],"Use a normal map").unwrap();
+    editor.apply_to(&doc,vec![json!({"cmd":"import.configure","args":{"source":"paint.png","settings":{"usage":"normal","mipmaps":false},"preset":"balanced"}})],"Use a normal map").unwrap();
     assert_eq!(
         editor
             .host
@@ -544,7 +577,7 @@ fn import_settings_are_typed_attributed_and_undoable() {
             .unwrap()["settings"],
         json!({})
     );
-    assert!(editor.apply_to(&doc,vec![json!({"cmd":"editor.import.settings","args":{"settings":{"unknown":true},"preset":"fast"}})],"Invalid setting").is_err());
+    assert!(editor.apply_to(&doc,vec![json!({"cmd":"import.configure","args":{"source":"paint.png","settings":{"unknown":true},"preset":"fast"}})],"Invalid setting").is_err());
     assert!(
         editor
             .action("editor.asset.import", json!({"path":"../escape.png"}))
@@ -729,7 +762,13 @@ fn material_values_and_animation_layout_share_undo_and_survive_reopen() {
     let mut invalid_shell = Shell::new(&mut editor, [1440., 900.]).unwrap();
     editor.apply_to(&material,vec![json!({"cmd":"graph.param.set","args":{"node":node,"name":"value","value":"invalid numeric default"}})],"Verify node diagnostics").unwrap();
     invalid_shell.rebuild(&mut editor).unwrap();
-    assert!(invalid_shell.ui.find("material-error-0").is_some());
+    // The Material tool's status strip names the first error.
+    assert!(
+        invalid_shell
+            .ui
+            .find("material-status-error-text")
+            .is_some()
+    );
     assert!(
         invalid_shell.layout_report()["graph"]["nodes"]
             .as_array()
@@ -739,7 +778,12 @@ fn material_values_and_animation_layout_share_undo_and_survive_reopen() {
     );
     editor.action("history.undo", json!({})).unwrap();
     invalid_shell.rebuild(&mut editor).unwrap();
-    assert!(invalid_shell.ui.find("material-error-0").is_none());
+    assert!(
+        invalid_shell
+            .ui
+            .find("material-status-error-text")
+            .is_none()
+    );
     drop(invalid_shell);
 
     let animation = editor
@@ -827,4 +871,320 @@ fn material_values_and_animation_layout_share_undo_and_survive_reopen() {
     )
     .unwrap();
     assert_eq!(graph.editor.comments["note"].text, "Locomotion");
+}
+
+/// Tests never touch the owner's profile (%APPDATA%\Ara, %LOCALAPPDATA%\Ara): cargo
+/// gives every test and the editors it starts isolated directories under target/
+/// (`.cargo/config.toml`), and without them the editor refuses to start.
+#[test]
+fn tests_resolve_isolated_profile_directories_under_target() {
+    let config = ara_editor::settings::config_dir().expect("an isolated config directory");
+    let crashes = std::env::var_os("ARA_CRASH_DIR")
+        .map(std::path::PathBuf::from)
+        .expect("ARA_CRASH_DIR");
+    for dir in [&config, &crashes] {
+        assert!(
+            dir.components().any(|c| c.as_os_str() == "target"),
+            "{dir:?} is not under target/"
+        );
+        for profile in [
+            "APPDATA",
+            "LOCALAPPDATA",
+            "XDG_CONFIG_HOME",
+            "XDG_STATE_HOME",
+        ] {
+            if let Some(profile_dir) = std::env::var_os(profile) {
+                assert!(
+                    !dir.starts_with(&profile_dir),
+                    "{dir:?} is inside {profile}"
+                );
+            }
+        }
+    }
+}
+
+/// The Scene quality is a user preference: it round-trips through the isolated
+/// profile and never lands in the project. The project's default is
+/// `rendering.quality` in ara.project.json, edited through the typed settings command.
+#[test]
+fn scene_quality_persists_as_a_preference_and_the_project_default_in_its_manifest() {
+    use ara_render_fidelity::presets::{QualityChoice, QualityPreset};
+    let project = Project::new();
+    let profile = ara_editor::settings::config_dir()
+        .unwrap()
+        .join(format!("quality-roundtrip-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&profile);
+    let preferences = profile.join("editor-settings.json");
+    assert!(
+        preferences.components().any(|c| c.as_os_str() == "target"),
+        "{preferences:?}"
+    );
+    {
+        let mut editor = Editor::open_with(&project.0, Some(preferences.clone())).unwrap();
+        editor
+            .action("editor.preferences", json!({"renderQuality":"epic"}))
+            .unwrap();
+        editor
+            .action(
+                "editor.settings.set",
+                json!({"key":"rendering.quality","value":"medium"}),
+            )
+            .unwrap();
+    }
+    let saved: Value =
+        serde_json::from_str(&std::fs::read_to_string(&preferences).unwrap()).unwrap();
+    assert_eq!(saved["viewport.quality"], "epic");
+    let manifest: Value =
+        serde_json::from_str(&std::fs::read_to_string(project.0.join("ara.project.json")).unwrap())
+            .unwrap();
+    assert_eq!(manifest["rendering"]["quality"], "medium");
+    assert!(!manifest.to_string().contains("viewport"), "{manifest}");
+
+    let mut editor = Editor::open_with(&project.0, Some(preferences.clone())).unwrap();
+    assert_eq!(
+        editor.state.render_quality,
+        Some(QualityChoice::Preset(QualityPreset::Epic))
+    );
+    assert_eq!(
+        editor.state.project_quality(),
+        QualityChoice::Preset(QualityPreset::Medium)
+    );
+    // Clearing the override falls back to the project's default.
+    editor
+        .action("editor.preferences", json!({"renderQuality":"project"}))
+        .unwrap();
+    assert_eq!(
+        editor.state.render_choice(),
+        QualityChoice::Preset(QualityPreset::Medium)
+    );
+    assert!(editor.state.quality);
+    editor
+        .action(
+            "editor.settings.set",
+            json!({"key":"rendering.quality","value":"low"}),
+        )
+        .unwrap();
+    assert!(
+        !editor.state.quality,
+        "a Low project default is the raster view"
+    );
+    drop(editor);
+
+    // Preferences from before presets: Raster becomes Low.
+    std::fs::write(&preferences, r#"{"viewport.quality":"raster"}"#).unwrap();
+    let editor = Editor::open_with(&project.0, Some(preferences.clone())).unwrap();
+    assert_eq!(
+        editor.state.render_quality,
+        Some(QualityChoice::Preset(QualityPreset::Low))
+    );
+    drop(editor);
+    std::fs::remove_dir_all(&profile).unwrap();
+}
+
+/// A scene that references a missing model file still opens: the entity draws a
+/// placeholder and Problems names the path (ARA4506), once per path.
+#[test]
+fn missing_model_sources_open_with_placeholders_and_name_the_path() {
+    use ara_editor::world::EditWorldView;
+    let project = Project::new();
+    write(
+        &project.0.join("levels/main.scene"),
+        json!({"$schema":"ara://schema/scene/1","id":"sc_test0001","records":{
+            "e_hangar01":{"name":"Hangar","Transform":{},"MeshRenderer":{"model":"@assets/kit/hangar.gltf#as_kithangar"}},
+            "e_crate001":{"name":"Salvage crate","Transform":{"position":[0,0.6,0]},"MeshRenderer":{}}}}),
+    );
+    let mut editor = project.open();
+    let view = editor.view().unwrap();
+    let scene = view
+        .scene(
+            &project.0,
+            &editor.state,
+            None,
+            &mut ara_editor::world::ModelCache::new(&project.0).unwrap(),
+        )
+        .unwrap();
+    assert!(
+        scene.meshes.iter().any(|m| m.name == "Hangar"),
+        "a placeholder"
+    );
+    editor.report_missing_sources(&view);
+    editor.report_missing_sources(&view);
+    let logs = editor
+        .action("logs", json!({"codes": ["ARA4506"], "group": false}))
+        .unwrap();
+    assert_eq!(logs["total"], 1, "{logs}");
+    let text = logs["text"].as_str().unwrap();
+    assert!(
+        text.contains("`assets/kit/hangar.gltf` is missing"),
+        "{text}"
+    );
+}
+
+/// The Scene view camera carries its vertical field of view: `editor.camera` reads
+/// it, sets it within 10–120°, and looks through a scene Camera entity (pose and
+/// FOV); `spec()` hands it to the renderer.
+#[test]
+fn scene_view_fov_is_read_set_clamped_and_aligned_to_a_scene_camera() {
+    let project = Project::new();
+    write(
+        &project.0.join("levels/main.scene"),
+        json!({"$schema":"ara://schema/scene/1","id":"sc_test0001","records":{
+            "e_crate001":{"name":"Salvage crate","Transform":{"position":[0,0.6,0]},"MeshRenderer":{}},
+            "e_rig00001":{"name":"Rig","Transform":{"position":[0,1,4]}},
+            "e_shot0001":{"name":"Shot","parent":"e_rig00001","Transform":{"position":[2,0.5,2],"rotation":[-12,25,0]},"Camera":{"fov":46}}}}),
+    );
+    let mut editor = project.open();
+    let read = editor.action("editor.camera", json!({})).unwrap();
+    assert_eq!(
+        read["camera"]["fovYDegrees"], 46.,
+        "a scene opens through its gameplay camera"
+    );
+    editor
+        .action("editor.camera", json!({"fovYDegrees": 200}))
+        .unwrap();
+    assert_eq!(editor.state.camera.fov_y_degrees, 120.);
+    let set = editor
+        .action("editor.camera", json!({"fovYDegrees": 54}))
+        .unwrap();
+    assert_eq!(set["camera"]["fovYDegrees"], 54.);
+    let ara_render::scene::CameraSpec::LookAt { vertical_fov, .. } = editor.state.camera.spec()
+    else {
+        panic!("the Scene view is a perspective camera")
+    };
+    assert!((vertical_fov - 54f32.to_radians()).abs() < 1e-6);
+
+    // Looking through the shot copies its world pose (under its parent) and FOV.
+    editor
+        .action("editor.camera", json!({"entity":"e_shot0001"}))
+        .unwrap();
+    let camera = editor.state.camera;
+    assert_eq!(camera.fov_y_degrees, 46.);
+    assert!(
+        camera.position().distance(Vec3::new(2., 1.5, 6.)) < 1e-4,
+        "{:?}",
+        camera.position()
+    );
+    let rotation = glam::Quat::from_euler(
+        glam::EulerRot::XYZ,
+        (-12f32).to_radians(),
+        25f32.to_radians(),
+        0.,
+    );
+    let forward = (camera.target - camera.position()).normalize();
+    assert!(forward.dot(rotation * Vec3::NEG_Z) > 0.99999, "{forward:?}");
+    let error = editor
+        .action("editor.camera", json!({"entity":"e_crate001"}))
+        .unwrap_err();
+    assert!(error.to_string().contains("no Camera component"), "{error}");
+
+    // Cameras saved before the field existed get the default.
+    let saved: ara_editor::state::Camera =
+        serde_json::from_value(json!({"target":[0,0,0],"yaw":0,"pitch":0.2,"distance":5})).unwrap();
+    assert_eq!(saved.fov_y_degrees, 50.);
+}
+
+/// A scene opens with its last camera (a user preference beside
+/// editor-settings.json, FOV included), else its gameplay camera's view (a follow
+/// rig pivots on what it aims at), else its content without terrain or ground; F
+/// and Frame All skip terrain and ground planes unless they are selected.
+#[test]
+fn scenes_open_with_their_saved_or_gameplay_camera_and_framing_skips_terrain() {
+    let project = Project::new();
+    write(
+        &project.0.join("ara.project.json"),
+        json!({"name":"Editor test","main":"levels/main.scene"}),
+    );
+    write(
+        &project.0.join("levels/main.scene"),
+        json!({"$schema":"ara://schema/scene/1","id":"sc_test0001","records":{
+            "e_crate001":{"name":"Salvage crate","Transform":{"position":[2,0.5,-3]},"MeshRenderer":{}},
+            "e_ground01":{"name":"Ground","Transform":{},"MeshRenderer":{"shape":"plane","size":[400,1,400]}},
+            "e_chunk001":{"name":"Terrain chunk","Transform":{"position":[300,0,300],"scale":[96,10,96]},"TerrainChunk":{"x":3,"z":3}}}}),
+    );
+    write(
+        &project.0.join("levels/rig.scene"),
+        json!({"$schema":"ara://schema/scene/1","id":"sc_test0002","records":{
+            "e_player01":{"name":"Player","Transform":{"position":[10,0,4]},"MeshRenderer":{}},
+            "e_camera01":{"name":"Follow camera","Transform":{"position":[0,9,0]},"Camera":{"fov":46},
+                "FollowCamera":{"target":"e_player01","distance":4,"height":1.5,"yaw":30,"pitch":15}}}}),
+    );
+    // A static wall 2 m behind the player (a sensor before it does not count).
+    write(
+        &project.0.join("levels/wall.scene"),
+        json!({"$schema":"ara://schema/scene/1","id":"sc_test0003","records":{
+            "e_player01":{"name":"Player","Transform":{},"MeshRenderer":{}},
+            "e_wall0001":{"name":"Wall","Transform":{"position":[0,1,-2]},"Collider":{"halfExtents":[5,3,0.1]},"RigidBody":{}},
+            "e_sensor01":{"name":"Trigger","Transform":{"position":[0,1,-1]},"Collider":{"halfExtents":[5,3,0.1],"sensor":true},"RigidBody":{}},
+            "e_camera01":{"name":"Follow camera","Transform":{},"Camera":{},
+                "FollowCamera":{"target":"e_player01","distance":4,"height":1.5,"pitch":0}}}}),
+    );
+    let crate_centre = Vec3::new(2., 0.5, -3.);
+    {
+        let mut editor = project.open();
+        // No gameplay camera: the crate, not the 400 m ground or the far terrain.
+        let camera = editor.state.camera;
+        assert!(camera.target.distance(crate_centre) < 1e-4, "{camera:?}");
+        assert!(camera.distance < 5., "{camera:?}");
+        assert_eq!((camera.yaw, camera.pitch), (0.6, 0.45));
+        editor
+            .action("editor.camera", json!({"target":[50,0,50]}))
+            .unwrap();
+        editor.action("editor.frame", json!({})).unwrap();
+        assert!(editor.state.camera.target.distance(crate_centre) < 1e-4);
+        // Selected terrain or ground is framed.
+        editor
+            .action("editor.select", json!({"entities":["e_ground01"]}))
+            .unwrap();
+        editor.action("editor.frame", json!({})).unwrap();
+        assert!(editor.state.camera.target.length() < 1e-4);
+        assert!(editor.state.camera.distance > 200.);
+
+        // The follow rig's view, as Play places it, pivoting on the aim point.
+        editor
+            .action("editor.scene.open", json!({"scene":"levels/rig.scene"}))
+            .unwrap();
+        let camera = editor.state.camera;
+        let aim = Vec3::new(10., 1.5, 4.);
+        let (yaw, pitch) = (30f32.to_radians(), 15f32.to_radians());
+        let forward = Vec3::new(
+            yaw.sin() * pitch.cos(),
+            -pitch.sin(),
+            yaw.cos() * pitch.cos(),
+        );
+        assert!(camera.target.distance(aim) < 1e-4, "{camera:?}");
+        assert!(camera.position().distance(aim - forward * 4.) < 1e-4);
+        assert_eq!(camera.fov_y_degrees, 46.);
+
+        // The rig's boom stops in front of the wall (1.9 m away, less 0.25 m).
+        editor
+            .action("editor.scene.open", json!({"scene":"levels/wall.scene"}))
+            .unwrap();
+        let camera = editor.state.camera;
+        assert!((camera.distance - 1.65).abs() < 1e-3, "{camera:?}");
+        assert!(camera.position().z > -1.9, "{:?}", camera.position());
+    }
+
+    // The last camera per scene is a user preference (isolated under target/).
+    let profile = ara_editor::settings::config_dir()
+        .unwrap()
+        .join(format!("scene-cameras-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&profile);
+    let preferences = profile.join("editor-settings.json");
+    let saved = {
+        let mut editor =
+            ara_editor::Editor::open_with(&project.0, Some(preferences.clone())).unwrap();
+        editor
+            .action(
+                "editor.camera",
+                json!({"target":[1,2,3],"yaw":1.2,"pitch":0.3,"distance":7,"fovYDegrees":54}),
+            )
+            .unwrap();
+        editor.state.camera
+    };
+    assert!(profile.join("scene-cameras.json").is_file());
+    let editor = ara_editor::Editor::open_with(&project.0, Some(preferences)).unwrap();
+    assert_eq!(editor.state.camera, saved);
+    assert_eq!(editor.state.camera.fov_y_degrees, 54.);
+    drop(editor);
+    std::fs::remove_dir_all(&profile).unwrap();
 }

@@ -10,7 +10,7 @@ pub enum PlayerTemplate {
     /// S7 ABI and pack verification only; does not execute authored demo gameplay.
     #[default]
     Conformance,
-    /// The integrated engine player supplied by the runtime owner.
+    /// The real engine player: a pinned ZIP with ara-player and cooked resources.
     Runtime,
 }
 impl PlayerTemplate {
@@ -214,7 +214,10 @@ pub struct ExportPreset {
     #[serde(default)]
     #[ara(default = "nativeAot")]
     pub lane: ScriptLane,
-    /// Project-relative C# project file.
+    /// Project-relative S7 conformance project; runtime exports generate their own
+    /// NativeAOT entry from `ara.module.toml` modules and may omit this field.
+    #[serde(default)]
+    #[ara(default = "")]
     pub script_project: String,
     /// Assembly name and native image stem emitted by the C# project.
     pub assembly: String,
@@ -301,6 +304,32 @@ impl ExportPreset {
     }
     /// Parses strict JSON, validates schema identity and platform invariants.
     pub fn from_text(text: &str) -> Result<Self> {
+        let preset = Self::parse(text)?;
+        preset.validate()?;
+        Ok(preset)
+    }
+    /// Writes schema-ordered canonical strict JSON with defaults omitted.
+    pub fn to_text(&self) -> Result<String> {
+        self.validate()?;
+        self.canonical()
+    }
+    /// As [`from_text`](Self::from_text) for a preset whose runtime templates are
+    /// pinned by whoever builds it: the editor's Build Current Profile pins this
+    /// engine's player at build time, so the file holds no machine paths. Every other
+    /// invariant holds; [`validate`](Self::validate) still requires the pins before
+    /// an export.
+    pub fn from_unpinned_text(text: &str) -> Result<Self> {
+        let preset = Self::parse(text)?;
+        preset.check(false)?;
+        Ok(preset)
+    }
+    /// Writes a preset that may leave its templates unpinned (see
+    /// [`from_unpinned_text`](Self::from_unpinned_text)).
+    pub fn to_unpinned_text(&self) -> Result<String> {
+        self.check(false)?;
+        self.canonical()
+    }
+    fn parse(text: &str) -> Result<Self> {
         let mut value = ara_json::parse(text)?;
         ensure!(
             value.get("$schema").and_then(|v| v.as_str()) == Some("ara://schema/export/1"),
@@ -310,13 +339,9 @@ impl ExportPreset {
             .as_object_mut()
             .ok_or_else(|| anyhow::anyhow!("preset must be an object"))?
             .shift_remove("$schema");
-        let preset: Self = serde_json::from_value(value)?;
-        preset.validate()?;
-        Ok(preset)
+        Ok(serde_json::from_value(value)?)
     }
-    /// Writes schema-ordered canonical strict JSON with defaults omitted.
-    pub fn to_text(&self) -> Result<String> {
-        self.validate()?;
+    fn canonical(&self) -> Result<String> {
         let mut db = SchemaDb::new();
         Self::register(&mut db);
         let value = db.canonical_value(
@@ -335,6 +360,10 @@ impl ExportPreset {
     }
     /// Checks unsupported combinations and portable path/pin constraints.
     pub fn validate(&self) -> Result<()> {
+        self.check(true)
+    }
+    /// `validate`, requiring one pinned template per architecture when `pinned`.
+    fn check(&self, pinned: bool) -> Result<()> {
         self.crash.validate()?;
         let compatible = match self.packaging {
             PackageFormat::Folder => true,
@@ -393,15 +422,19 @@ impl ExportPreset {
             (1..=ara_pack::MAX_CHUNK as u32).contains(&self.chunk_size),
             "ARA-EXP-PRE-003: chunk size must be 1..=16 MiB"
         );
-        for p in [&self.script_project, &self.content] {
-            ara_pack::validate_path(p)?;
+        let script_free =
+            self.player_template == PlayerTemplate::Runtime && self.script_project.is_empty();
+        ara_pack::validate_path(&self.content)?;
+        if !script_free {
+            ara_pack::validate_path(&self.script_project)?;
         }
         ensure!(
-            !self.assembly.is_empty()
-                && self
-                    .assembly
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_'),
+            script_free
+                || (!self.assembly.is_empty()
+                    && self
+                        .assembly
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_')),
             "ARA-EXP-PRE-004: invalid assembly stem"
         );
         if self.platform == Platform::Android {
@@ -440,7 +473,8 @@ impl ExportPreset {
                 "ARA-EXP-TPL-002: invalid template hash"
             );
         }
-        if !matches!(self.platform, Platform::Macos | Platform::Ios)
+        if pinned
+            && !matches!(self.platform, Platform::Macos | Platform::Ios)
             && arches.len() != self.platform.arches().len()
         {
             bail!("ARA-EXP-TPL-003: one pinned template per architecture is required");

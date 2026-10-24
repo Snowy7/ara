@@ -1,3 +1,4 @@
+use super::image_copy::copy_regions;
 use super::recording::access;
 use super::*;
 use crate::commands::*;
@@ -60,7 +61,13 @@ impl VulkanDevice {
                                 (dst_stage, dst_access),
                             )
                             .src_queue_family_index(from)
-                            .dst_queue_family_index(to);
+                            .dst_queue_family_index(to)
+                            .subresource_range(
+                                vk::ImageSubresourceRange::default()
+                                    .aspect_mask(i.raw.aspect)
+                                    .level_count(i.raw.mip_levels)
+                                    .layer_count(1),
+                            );
                             device.cmd_pipeline_barrier2(
                                 cmd,
                                 &vk::DependencyInfo::default().image_memory_barriers(&[barrier]),
@@ -222,7 +229,7 @@ impl VulkanDevice {
                         self.buffers.get(*source)?.raw.handle,
                         i.handle,
                         vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                        &[copy_region(i)],
+                        copy_regions(i)?.as_ref(),
                     );
                 }
                 Command::CopyBuffer {
@@ -237,6 +244,31 @@ impl VulkanDevice {
                         &[vk::BufferCopy::default().size(*size)],
                     );
                 }
+                Command::CopyImage {
+                    source,
+                    destination,
+                } => {
+                    let source = self.images.get(*source)?.raw;
+                    let destination = self.images.get(*destination)?.raw;
+                    let layers = vk::ImageSubresourceLayers::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .layer_count(1);
+                    device.cmd_copy_image(
+                        cmd,
+                        source.handle,
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        destination.handle,
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        &[vk::ImageCopy::default()
+                            .src_subresource(layers)
+                            .dst_subresource(layers)
+                            .extent(vk::Extent3D {
+                                width: source.width,
+                                height: source.height,
+                                depth: 1,
+                            })],
+                    );
+                }
                 Command::ReadImage {
                     source,
                     destination,
@@ -247,7 +279,7 @@ impl VulkanDevice {
                         i.handle,
                         vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                         self.buffers.get(*destination)?.raw.handle,
-                        &[copy_region(i)],
+                        copy_regions(i)?.as_ref(),
                     );
                 }
                 Command::BeginPass(_) | Command::EndPass => {
@@ -298,17 +330,4 @@ unsafe fn viewport(device: &ash::Device, cmd: vk::CommandBuffer, origin: [u32; 2
             }],
         );
     }
-}
-fn copy_region(i: ImageAllocation) -> vk::BufferImageCopy {
-    vk::BufferImageCopy::default()
-        .image_subresource(
-            vk::ImageSubresourceLayers::default()
-                .aspect_mask(i.aspect)
-                .layer_count(1),
-        )
-        .image_extent(vk::Extent3D {
-            width: i.width,
-            height: i.height,
-            depth: 1,
-        })
 }

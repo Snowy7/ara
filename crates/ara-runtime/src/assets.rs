@@ -3,11 +3,20 @@
 //! only at a tick boundary (D20), and a failed reload keeps the last good model.
 use crate::{Result, RuntimeError, model::Model};
 use ara_asset::{CacheBackend, CachedImport, Digest, FileCache};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 /// Read access to published cooked generations. The edit-world owner pins which
 /// generation is live; players never run importers.
 pub trait AssetSource: Send + Sync {
+    /// Published action digest from immutable generation metadata, without reading
+    /// or decoding a payload. `None` means unavailable; callers then use `load`.
+    fn digest(&self, _asset: &str) -> Option<Digest> {
+        None
+    }
+
     /// The live generation of an imported asset (`as_…` sidecar ID), if published.
     fn load(&self, asset: &str) -> Result<Option<(Digest, CachedImport)>>;
 }
@@ -30,6 +39,10 @@ impl CachedAssets {
 }
 
 impl AssetSource for CachedAssets {
+    fn digest(&self, asset: &str) -> Option<Digest> {
+        self.pins.get(asset).copied()
+    }
+
     fn load(&self, asset: &str) -> Result<Option<(Digest, CachedImport)>> {
         let Some(&digest) = self.pins.get(asset) else {
             return Ok(None);
@@ -43,6 +56,10 @@ impl AssetSource for CachedAssets {
 pub struct MemoryAssets(pub BTreeMap<String, CachedImport>);
 
 impl AssetSource for MemoryAssets {
+    fn digest(&self, asset: &str) -> Option<Digest> {
+        self.0.get(asset).map(|cached| cached.key)
+    }
+
     fn load(&self, asset: &str) -> Result<Option<(Digest, CachedImport)>> {
         Ok(self.0.get(asset).map(|c| (c.key, c.clone())))
     }
@@ -52,9 +69,49 @@ impl AssetSource for MemoryAssets {
 #[derive(Default, Clone)]
 pub struct Models {
     models: BTreeMap<String, Arc<Model>>,
+    wanted: BTreeSet<String>,
 }
 
 impl Models {
+    /// Checks model selectors of scene, prefab and streamed-cell records against
+    /// loaded content. Missing imports already have their own load diagnostic.
+    pub(crate) fn validate_renderers(&self, workspace: &ara_doc::Workspace) -> Vec<String> {
+        let mut errors = Vec::new();
+        for (path, document) in workspace.docs() {
+            for (id, record) in document.records() {
+                let Some(value) = record.get("MeshRenderer") else {
+                    continue;
+                };
+                let checked = (|| -> Result<()> {
+                    let renderer: crate::components::MeshRenderer =
+                        serde_json::from_value(value.clone())?;
+                    if let Some(reference) = &renderer.model {
+                        if let Some(model) = self.get(asset_id(reference)?) {
+                            model.validate_renderer(&renderer)?;
+                        }
+                    } else if renderer.node.is_some() || renderer.primitive.is_some() {
+                        return Err(RuntimeError(
+                            "node/primitive selectors require a model".into(),
+                        ));
+                    } else if renderer.material_overrides.len() > 1
+                        || renderer
+                            .material_overrides
+                            .iter()
+                            .any(|entry| entry.primitive != 0)
+                    {
+                        return Err(RuntimeError(
+                            "procedural shapes have one material slot, numbered zero".into(),
+                        ));
+                    }
+                    Ok(())
+                })();
+                if let Err(error) = checked {
+                    errors.push(format!("ARA7310: {path}#{id}: {error}"));
+                }
+            }
+        }
+        errors
+    }
     /// The decoded live model for an asset ID.
     pub fn get(&self, asset: &str) -> Option<&Arc<Model>> {
         self.models.get(asset)
@@ -62,6 +119,14 @@ impl Models {
     /// Decodes `asset` from `source` unless that exact generation is already loaded.
     /// Returns whether a new generation was installed.
     pub fn load(&mut self, source: &dyn AssetSource, asset: &str) -> Result<bool> {
+        if self
+            .models
+            .get(asset)
+            .is_some_and(|model| source.digest(asset) == Some(model.digest))
+        {
+            return Ok(false);
+        }
+        self.wanted.insert(asset.to_owned());
         let (digest, cached) = source
             .load(asset)?
             .ok_or_else(|| RuntimeError(format!("asset {asset} has no published generation")))?;
@@ -74,7 +139,7 @@ impl Models {
     }
     /// Every loaded asset ID.
     pub fn ids(&self) -> impl Iterator<Item = &str> {
-        self.models.keys().map(String::as_str)
+        self.wanted.iter().map(String::as_str)
     }
 }
 
@@ -84,4 +149,36 @@ pub fn asset_id(reference: &ara_schema::AssetRef) -> Result<&str> {
         .map_err(RuntimeError)?
         .id
         .ok_or_else(|| RuntimeError(format!("reference {} has no asset ID", reference.0)))
+}
+
+pub(crate) fn model_references(
+    key: &str,
+    value: &serde_json::Value,
+    models: &mut BTreeSet<String>,
+) -> Result<()> {
+    let reference = if key.contains("MeshRenderer.model") || key.contains("Collider.asset") {
+        value.as_str()
+    } else if key.contains("MeshRenderer") {
+        value.get("model").and_then(serde_json::Value::as_str)
+    } else if key.contains("Collider")
+        && value
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|kind| matches!(kind, "modelConvex" | "modelMesh"))
+    {
+        value.get("asset").and_then(serde_json::Value::as_str)
+    } else {
+        None
+    };
+    if let Some(reference) = reference {
+        models.insert(asset_id(&ara_schema::AssetRef(reference.to_owned()))?.to_owned());
+    }
+    if key == "overrides"
+        && let Some(values) = value.as_object()
+    {
+        for (key, value) in values {
+            model_references(key, value, models)?;
+        }
+    }
+    Ok(())
 }

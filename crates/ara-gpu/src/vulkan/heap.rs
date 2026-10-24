@@ -3,6 +3,19 @@ use super::{Context, Image};
 use crate::{GpuError, HeapIndex, Result};
 use ash::vk::{self, TaggedStructure};
 
+/// Currently reserved bindless slots, including resources awaiting retirement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DescriptorUsage {
+    /// Sampled image descriptors reserved by live or retiring images.
+    pub sampled_images: usize,
+    /// Storage buffer descriptors reserved by live or retiring buffers.
+    pub storage_buffers: usize,
+    /// Storage image descriptors reserved by live or retiring images.
+    pub storage_images: usize,
+    /// Acceleration descriptors reserved by live or retiring structures.
+    pub acceleration_structures: usize,
+}
+
 pub(super) struct Heap {
     pub layout: vk::PipelineLayout,
     pub set: vk::DescriptorSet,
@@ -16,29 +29,46 @@ pub(super) struct Heap {
     storage: Vec<(Image, vk::ImageView, HeapIndex)>,
 }
 impl Heap {
+    pub fn usage(&self, gpu: &Context) -> DescriptorUsage {
+        DescriptorUsage {
+            sampled_images: gpu.info.sampled_image_capacity as usize - self.free_images.len(),
+            storage_buffers: 64 - self.free_buffers.len(),
+            storage_images: 64 - self.free_storage.len(),
+            acceleration_structures: if gpu.info.ray_tracing { 16 } else { 0 }
+                - self.free_acceleration.len(),
+        }
+    }
     pub fn new(gpu: &Context) -> Result<Self> {
-        // SAFETY: This is the cooked v1 binding ABI; all pointers live through their calls.
+        // SAFETY: The versioned binding ABI is validated at pipeline creation;
+        // create-info backing slices remain live through their native calls.
         unsafe {
             let mut guard = super::guard::Objects::new(&gpu.device);
             let flags = vk::DescriptorBindingFlags::UPDATE_AFTER_BIND
                 | vk::DescriptorBindingFlags::PARTIALLY_BOUND;
             let mut binding_flags = vec![flags, flags, vk::DescriptorBindingFlags::empty(), flags];
             let mut bindings = vec![
-                (vk::DescriptorType::SAMPLED_IMAGE, 128),
-                (vk::DescriptorType::STORAGE_BUFFER, 64),
-                (vk::DescriptorType::SAMPLER, 3),
-                (vk::DescriptorType::STORAGE_IMAGE, 64),
+                (0, vk::DescriptorType::SAMPLED_IMAGE, 128),
+                (1, vk::DescriptorType::STORAGE_BUFFER, 64),
+                (2, vk::DescriptorType::SAMPLER, 3),
+                (3, vk::DescriptorType::STORAGE_IMAGE, 64),
             ];
             if gpu.info.ray_tracing {
-                bindings.push((vk::DescriptorType::ACCELERATION_STRUCTURE_KHR, 16));
+                bindings.push((4, vk::DescriptorType::ACCELERATION_STRUCTURE_KHR, 16));
                 binding_flags.push(flags);
             }
+            // Vulkan requires the variable-count binding to have the highest
+            // binding number, including on devices without acceleration binding 4.
+            bindings.push((
+                5,
+                vk::DescriptorType::SAMPLED_IMAGE,
+                gpu.info.sampled_image_capacity,
+            ));
+            binding_flags.push(flags | vk::DescriptorBindingFlags::VARIABLE_DESCRIPTOR_COUNT);
             let bindings = bindings
                 .into_iter()
-                .enumerate()
-                .map(|(i, (ty, count))| {
+                .map(|(binding, ty, count)| {
                     vk::DescriptorSetLayoutBinding::default()
-                        .binding(i as u32)
+                        .binding(binding)
                         .descriptor_type(ty)
                         .descriptor_count(count)
                         .stage_flags(vk::ShaderStageFlags::ALL)
@@ -75,12 +105,17 @@ impl Heap {
                 )
                 .map_err(anyhow::Error::from)?;
             guard.push(super::guard::Object::Pool(pool));
+            let counts = [gpu.info.sampled_image_capacity];
+            let mut variable_count =
+                vk::DescriptorSetVariableDescriptorCountAllocateInfo::default()
+                    .descriptor_counts(&counts);
             let set = gpu
                 .device
                 .allocate_descriptor_sets(
                     &vk::DescriptorSetAllocateInfo::default()
                         .descriptor_pool(pool)
-                        .set_layouts(&[set_layout]),
+                        .set_layouts(&[set_layout])
+                        .push(&mut variable_count),
                 )
                 .map_err(anyhow::Error::from)?[0];
             let mut samplers = [vk::Sampler::null(); 3];
@@ -91,7 +126,8 @@ impl Heap {
                         &vk::SamplerCreateInfo::default()
                             .mag_filter(vk::Filter::LINEAR)
                             .min_filter(vk::Filter::LINEAR)
-                            .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
+                            .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+                            .max_lod(vk::LOD_CLAMP_NONE)
                             .address_mode_u(if index == 2 {
                                 vk::SamplerAddressMode::CLAMP_TO_EDGE
                             } else {
@@ -137,8 +173,12 @@ impl Heap {
                 set_layout,
                 pool,
                 samplers,
-                free_acceleration: (0..16).rev().collect(),
-                free_images: (0..128).rev().collect(),
+                free_acceleration: if gpu.info.ray_tracing {
+                    (0..16).rev().collect()
+                } else {
+                    Vec::new()
+                },
+                free_images: (0..gpu.info.sampled_image_capacity).rev().collect(),
                 free_buffers: (0..64).rev().collect(),
                 free_storage: (0..64).rev().collect(),
                 storage: Vec::new(),
@@ -155,15 +195,23 @@ impl Heap {
             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
         // SAFETY: Fresh UAB slot cannot have a pending reader. Resource lifetime follows retirement.
         unsafe {
-            gpu.device.update_descriptor_sets(
-                &[vk::WriteDescriptorSet::default()
+            let writes = [
+                vk::WriteDescriptorSet::default()
+                    .dst_set(self.set)
+                    .dst_binding(5)
+                    .dst_array_element(index)
+                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                    .image_info(&info),
+                // A compatibility alias only, never the engine scene's limit.
+                vk::WriteDescriptorSet::default()
                     .dst_set(self.set)
                     .dst_binding(0)
                     .dst_array_element(index)
                     .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                    .image_info(&info)],
-                &[],
-            );
+                    .image_info(&info),
+            ];
+            gpu.device
+                .update_descriptor_sets(&writes[..if index < 128 { 2 } else { 1 }], &[]);
         }
         Ok(HeapIndex { index })
     }

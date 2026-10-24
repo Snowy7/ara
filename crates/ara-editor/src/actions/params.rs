@@ -77,6 +77,25 @@ pub(super) struct EditorReport {
     pub session: String,
     /// Actionable editor error message.
     pub message: String,
+    /// What failed: `action` (default), `thumbnail`, `settings`, `transport`, `render`
+    /// or `missing` (a scene's asset file).
+    pub kind: Option<String>,
+    /// What it is about (`asset:@textures/a.png`, `entity:e_8b21`); default `system:editor`.
+    pub subject: Option<String>,
+}
+/// Parameters of `editor.scene.open`.
+#[derive(Schema, Deserialize)]
+#[ara(params)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct EditorSceneOpen {
+    /// Live protocol session.
+    #[expect(
+        dead_code,
+        reason = "Host validates the session before service dispatch"
+    )]
+    pub session: String,
+    /// Project-relative scene path (`levels/hangar.scene`) or scene document ID.
+    pub scene: String,
 }
 /// Parameters for selecting entities without consuming the content undo stack.
 #[derive(Schema, Deserialize)]
@@ -114,7 +133,23 @@ pub(super) struct EditorFocus {
     /// Field path to reveal, when focusing the inspector.
     pub field: Option<String>,
 }
-/// Parameters for an explicit orbit camera pose.
+/// Parameters of `editor.frame`.
+#[derive(Schema, Deserialize)]
+#[ara(params)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct EditorFrame {
+    /// Live protocol session.
+    #[expect(
+        dead_code,
+        reason = "Host validates the session before service dispatch"
+    )]
+    pub session: String,
+    /// Show the scene as it opens instead: its gameplay camera's view, else its
+    /// content (terrain and ground excluded) from a three-quarter angle.
+    pub opening: Option<bool>,
+}
+/// Parameters to read or change the Scene view camera. Omitted fields keep their
+/// values; with none given the call only reads the camera.
 #[derive(Schema, Deserialize)]
 #[ara(params)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -125,16 +160,22 @@ pub(super) struct EditorCamera {
         reason = "Host validates the session before service dispatch"
     )]
     pub session: String,
+    /// A scene entity with a `Camera` component: look from its world pose with its
+    /// field of view (applied before the other fields).
+    pub entity: Option<String>,
     /// Orbit centre, in metres.
     #[ara(unit=Meters)]
-    pub target: [f32; 3],
+    pub target: Option<[f32; 3]>,
     /// Azimuth, in radians.
-    pub yaw: f32,
+    pub yaw: Option<f32>,
     /// Elevation, in radians.
-    pub pitch: f32,
+    pub pitch: Option<f32>,
     /// Positive orbit distance, in metres.
     #[ara(unit=Meters)]
-    pub distance: f32,
+    pub distance: Option<f32>,
+    /// Vertical field of view, in degrees; clamped to 10–120.
+    #[ara(unit=Degrees)]
+    pub fov_y_degrees: Option<f32>,
 }
 /// Parameters for a theme switch.
 #[derive(Schema, Deserialize)]
@@ -283,8 +324,12 @@ pub(super) struct EditorPreferences {
     pub session: String,
     /// Disable 140 ms decorative transitions.
     pub reduce_motion: Option<bool>,
-    /// Use hardware fidelity lighting, or the fast raster view.
+    /// Legacy switch: true uses the project's default quality (Auto if that is Low),
+    /// false the Low raster view. Prefer `renderQuality`.
     pub quality: Option<bool>,
+    /// Scene viewport quality: `project` (the project's default), `auto`, `low`,
+    /// `medium`, `high` or `epic`. A user preference, never saved in the project.
+    pub render_quality: Option<String>,
 }
 /// Set or reset one setting; the edit is an undoable op attributed to the session.
 #[derive(Schema, Deserialize)]

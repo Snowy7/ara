@@ -56,7 +56,11 @@ mod tests {
             name: String::new(),
             vendor_id: 1,
             device_id: 2,
+            discrete: false,
+            device_local_mib: 0,
             ray_tracing: false,
+            texture_compression_bc: false,
+            sampled_image_capacity: 65_536,
             max_image_dimension: 16384,
             api_version: String::new(),
             driver_version: 3,
@@ -68,6 +72,8 @@ mod tests {
             timestamp_period_ns: 1.,
             timestamp_valid_bits: [64; 2],
             pipeline_cache_uuid: vec![7; 16],
+            external_memory: false,
+            identity: Default::default(),
         };
         let mut bytes = Vec::new();
         for word in [32u32, 1, 1, 2] {

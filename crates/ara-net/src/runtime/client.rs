@@ -51,7 +51,7 @@ struct Owner {
     origin: Option<u32>,
     ready: bool,
     limit: Option<u64>,
-    inputs: BTreeMap<u64, Injection>,
+    inputs: BTreeMap<(u64, String), Injection>,
     source: Option<fn(u64, PlayerId) -> Option<ActionValue>>,
     last_checked: BTreeMap<NetId, u32>,
     status: ClientStatus,
@@ -83,13 +83,18 @@ impl<F: SimulationFeature> Client<F> {
     /// Connects with a trusted short-lived token and matching schema registry.
     pub fn new(policies: PolicyRegistry, config: ClientConfig, token: JoinToken) -> Result<Self> {
         let mut app = base::<F>(false, policies, config.hz)?;
-        app.insert_resource(PredictionManager::default());
+        let input_delay = lightyear::prelude::client::InputDelayConfig::no_input_delay();
+        let mut prediction = PredictionManager::default();
+        // Retain every tick the input timeline is allowed to predict. Otherwise
+        // delayed confirmations arrive after native rollback has pruned their history.
+        prediction.rollback_policy.max_rollback_ticks = input_delay.maximum_predicted_ticks;
+        app.insert_resource(prediction);
         app.insert_resource(InputTimelineConfig::new(
             SyncConfig {
                 jitter_margin: 6.0,
                 ..Default::default()
             },
-            lightyear::prelude::client::InputDelayConfig::no_input_delay(),
+            input_delay,
         ));
         app.insert_resource(Owner {
             player: config.player,
@@ -155,11 +160,29 @@ impl<F: SimulationFeature> Client<F> {
     pub fn input_source(&mut self, source: fn(u64, PlayerId) -> Option<ActionValue>) {
         self.app.world_mut().resource_mut::<Owner>().source = Some(source);
     }
+    /// Installs a shared multi-action codec before the client starts polling.
+    pub fn action_codec(&mut self, codec: crate::ActionCodec<F::Input>) {
+        self.app.insert_resource(codec);
+    }
     /// Queues bounded headless/device action injection at an explicit game tick.
     pub fn inject(&mut self, tick: u64, input: Injection) -> Result<()> {
+        let codec = self
+            .app
+            .world()
+            .get_resource::<crate::ActionCodec<F::Input>>();
+        if let Some(codec) = codec {
+            if !codec.names.contains(&input.action.as_str()) {
+                return Err(NetError("undeclared predicted action".into()));
+            }
+            (codec.sample)(&BTreeMap::from([(input.action.clone(), input.value)]))?;
+        } else {
+            if input.action != F::ACTION {
+                return Err(NetError("undeclared predicted action".into()));
+            }
+            F::input(Some(input.value))?;
+        }
         let mut owner = self.app.world_mut().resource_mut::<Owner>();
         if input.player != owner.player
-            || input.action != F::ACTION
             || input.hold_ticks == 0
             || tick.checked_add(u64::from(input.hold_ticks)).is_none()
             || owner.inputs.len() >= 2048
@@ -168,8 +191,7 @@ impl<F: SimulationFeature> Client<F> {
         {
             return Err(NetError("invalid/bounded client action injection".into()));
         }
-        F::input(Some(input.value))?;
-        owner.inputs.insert(tick, input);
+        owner.inputs.insert((tick, input.action.clone()), input);
         Ok(())
     }
     /// Sends only a typed intent. There is no editor-op/state-write message route.
@@ -217,6 +239,15 @@ impl<F: SimulationFeature> Client<F> {
         self.app.update();
         if let Some(e) = &self.app.world().resource::<Owner>().fault {
             return Err(e.clone());
+        }
+        Ok(())
+    }
+    /// Advances transport and prediction with caller-supplied elapsed time.
+    /// Drive every peer and its links from one clock; do not mix with [`Self::poll`].
+    pub fn advance(&mut self, elapsed: Duration) -> Result<()> {
+        super::advance(&mut self.app, elapsed);
+        if let Some(fault) = &self.app.world().resource::<Owner>().fault {
+            return Err(fault.clone());
         }
         Ok(())
     }

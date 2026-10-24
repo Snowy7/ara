@@ -8,6 +8,13 @@ ara-runtime, ara-sim. The .NET side lives in `dotnet/`.
 
 - `ScriptPlugin::new(ScriptSettings { host_dir, compile_server, modules }) -> (plugin,
   Receiver<ScriptEvent>)`; pass the plugin to `Runtime::new`.
+- `ScriptHostConfig::{Development, NativeAot}` selects the host; `ScriptPlugin::shipping`
+  takes an export-local `scripts.json`. It validates ABI/layout before loading, then
+  registers statically linked modules through the same gameplay ABI and snapshots.
+  No CoreCLR, Roslyn, module folders, watcher or hot reload is used in shipping.
+- `ScriptPlugin::prewarm(settings)` loads CoreCLR, Ara.Runtime, the compile server
+  and modules on an empty world. `prepare` moves that world and its host together
+  into the runtime; component IDs remain valid. No gameplay tick runs during warmup.
 - `ScriptEvent`: `Reload(ReloadReport)`, `Diagnostic`, `RestartRequired` (L4),
   `Types(path → *.types.json document)` after load and after each reload.
 - Between ticks (the player's RPC handlers): `execute(session, name, params)` runs a
@@ -23,7 +30,7 @@ ara-runtime, ara-sim. The .NET side lives in `dotnet/`.
 ## How it plugs in
 
 1. `prepare`: `ScriptHost::start` on the empty simulation world (engine binding:
-   `ara_components::Transform`), `load_modules`, then the module types join the
+   `EngineBindings::builtin()`, currently `ara_components::Transform`), `load_modules`, then the module types join the
    runtime schema, so scene documents may carry C# components.
 2. `register`: each C# component becomes an ara-sim external component
    (`SimRegistry::register_external`): documents validate against its schema type, the
@@ -63,6 +70,6 @@ gate checks the checked-in `Outpost.types.json` (`ARA_UPDATE_DEMO=1` regenerates
   `ScriptSet`s with Rust systems needs ara-script to schedule sets separately.
 - Replays apply recorded commands at their boundary, after that tick's inputs, live
   patches and streaming (live, they ran just before it).
-- Boot with modules is ~4 s (CLR start and Roslyn's first compile); there is no
-  prewarm in pooled players yet (it needs a .NET-side entry point).
+- `component_names`, `read` and `apply_replica` bridge script-owned columns to
+  networking; mirror writes merge received fields and preserve excluded fields.
 - `Scripts` is `Sync` by an explicit `unsafe impl`: never add a `Res<Scripts>` system.

@@ -14,6 +14,7 @@ impl GpuSystem {
         view: &View,
         readback: bool,
         advance: bool,
+        drawn: bool,
     ) -> Result<()> {
         ensure!(self.tick < u32::MAX, "VFX tick exhausted");
         ensure!(
@@ -39,7 +40,12 @@ impl GpuSystem {
                 && light.sun_color.cmpge(glam::Vec3::ZERO).all(),
             "invalid extracted VFX lighting"
         );
-        let camera = view.camera.resolve(self.size)?;
+        ensure!(
+            view.intensity.is_finite() && view.intensity >= 0.,
+            "VFX intensity must be finite and nonnegative"
+        );
+        let placement = view.placement;
+        let camera = placement.local_camera(&view.camera)?.resolve(self.size)?;
         self.color_target = self.hdr;
         self.color_index = self.hdr_index;
         self.preview_background = view.scene_color.is_none();
@@ -84,8 +90,14 @@ impl GpuSystem {
                 },
             0,
         ];
-        frame.ambient = view.lighting.ambient.extend(0.).to_array();
-        frame.sun_direction = view.lighting.sun_direction.extend(0.).to_array();
+        // ambient.w scales particle radiance; sun_direction.w converts world
+        // metres (scene depth, probe lattice) into local units.
+        frame.ambient = view.lighting.ambient.extend(view.intensity).to_array();
+        frame.sun_direction = view
+            .lighting
+            .sun_direction
+            .extend(placement.scale)
+            .to_array();
         frame.sun_color = view.lighting.sun_color.extend(0.).to_array();
         frame.probe_counts = [0; 4];
         if let Some(p) = &view.lighting.probes {
@@ -96,8 +108,10 @@ impl GpuSystem {
                     && p.spacing.cmpgt(glam::Vec3::ZERO).all(),
                 "invalid borrowed probe field"
             );
-            frame.probe_origin = p.origin.extend(0.).to_array();
-            frame.probe_spacing = p.spacing.extend(0.).to_array();
+            frame.probe_origin = ((p.origin - placement.origin) / placement.scale)
+                .extend(0.)
+                .to_array();
+            frame.probe_spacing = (p.spacing / placement.scale).extend(0.).to_array();
             frame.probe_counts = [p.counts[0], p.counts[1], p.counts[2], p.index + 1];
         }
         if let Some(depth) = view.scene_depth {
@@ -281,7 +295,10 @@ impl GpuSystem {
             }
             recorder.barriers(pass.before.iter().copied());
             recorder.push(Command::BeginPass(pass.name.to_owned()));
-            if !advance && (2..=10).contains(&pass.id.0) {
+            // Simulation-only ticks skip the backdrop copy, draw and tonemap.
+            if (!advance && (2..=10).contains(&pass.id.0))
+                || (!drawn && matches!(pass.id.0, 1 | 11 | 12))
+            {
                 recorder.push(Command::EndPass);
                 recorder.barriers(pass.after.iter().copied());
                 continue;

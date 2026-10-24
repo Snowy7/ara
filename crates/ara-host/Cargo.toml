@@ -19,11 +19,13 @@ ara-ops.workspace = true
 ara-proto.workspace = true
 ara-schema.workspace = true
 ara-why = { path = "../ara-why" }
-serde.workspace = true
-serde_json.workspace = true
+ara-ui-document = { path = "../ara-ui-document" }
+notify = "8.2"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["preserve_order", "float_roundtrip"] }
 
 [dev-dependencies]
-insta.workspace = true
+insta = { workspace = true }
 
 [lints]
 workspace = true

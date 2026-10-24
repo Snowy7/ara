@@ -102,6 +102,35 @@ impl Shell {
         self.rebuild(editor)?;
         Ok(rows)
     }
+    /// The open menu's command rows (after clicking a toolbar dropdown) as
+    /// `(command id, title as shown, checked)`.
+    pub fn open_menu_rows(&self, editor: &Editor) -> Vec<(String, String, Option<bool>)> {
+        self.menu_levels(editor)
+            .first()
+            .into_iter()
+            .flatten()
+            .filter_map(|row| match row {
+                Row::Command {
+                    id,
+                    target,
+                    label,
+                    checked,
+                    ..
+                } => {
+                    let spec = commands::get(id)?;
+                    let cx = self.ctx(editor, target);
+                    // As rendered: the row's own check (value menus), else the command's.
+                    let checked = checked.or(match spec.avail(&cx) {
+                        Avail::Checked(v) => Some(v),
+                        _ => None,
+                    });
+                    let title = label.clone().unwrap_or_else(|| spec.title(&cx));
+                    Some(((*id).to_owned(), title, checked))
+                }
+                _ => None,
+            })
+            .collect()
+    }
     fn rows(&self, editor: &Editor) -> Vec<MenuRow> {
         self.menu_levels(editor)
             .first()
@@ -150,6 +179,31 @@ impl Shell {
             return Err("no drop target under the pointer".into());
         }
         Ok(())
+    }
+    /// Poll the background asset scan once; rebuilds and returns true when it arrived.
+    pub fn poll_assets_for_test(&mut self, editor: &mut Editor) -> bool {
+        if self.poll_assets() || !self.browser.items.is_empty() {
+            let _ = self.rebuild(editor);
+            return !self.browser.items.is_empty();
+        }
+        false
+    }
+    /// Palette rows for `query` as (group, title, command id) without opening it.
+    pub fn palette_rows(
+        &mut self,
+        editor: &mut Editor,
+        query: &str,
+    ) -> Vec<(&'static str, String, Option<&'static str>)> {
+        self.palette_items(editor, query)
+            .into_iter()
+            .map(|item| {
+                let command = match item.binding {
+                    Binding::Command(id, _) => Some(id),
+                    _ => None,
+                };
+                (item.group, item.title, command)
+            })
+            .collect()
     }
     /// Open the context menu at a control (or the first hierarchy row) and list its commands.
     pub fn context_rows_at(

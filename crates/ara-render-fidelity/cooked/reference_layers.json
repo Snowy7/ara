@@ -1,15 +1,15 @@
 {
-  "binding_layout_hash": "1bb570eb9803435af351c803ea8ba5187b90052fdb0fc03c9f2140544242710f",
+  "binding_layout_hash": "35cd2a62b1ba741ce6823b3c8753d7b5aa97b54c5f0a837b56e542518013fd7e",
   "compiler": "2026.17-25-gc7954ebd1",
-  "key": "aaca1410d7d2d9203a854b71bde69d4fb770220db3d2db6010befbd5cfccc3ce",
+  "key": "f1a4b8ed976206787a15b17776937231d71dec874a7dc441a3a1fa6d9ef21f9b",
   "stages": [
     {
-      "dxil": "aaca1410d7d2d9203a854b71bde69d4fb770220db3d2db6010befbd5cfccc3ce/referenceLayersMain.dxil",
-      "dxil_hash": "5c5348cdacd91e7aabd30ef4d43206fb1e827b2b6e5de3067cabea53239f553e",
+      "dxil": "f1a4b8ed976206787a15b17776937231d71dec874a7dc441a3a1fa6d9ef21f9b/referenceLayersMain.dxil",
+      "dxil_hash": "9d7f59796f1cfb49c984c24d08c759689b167ae1439cec5e75e3a070b9c02f53",
       "source_entry": "referenceLayersMain",
-      "spirv": "aaca1410d7d2d9203a854b71bde69d4fb770220db3d2db6010befbd5cfccc3ce/referenceLayersMain.spv",
+      "spirv": "f1a4b8ed976206787a15b17776937231d71dec874a7dc441a3a1fa6d9ef21f9b/referenceLayersMain.spv",
       "spirv_entry": "main",
-      "spirv_hash": "4aeb8f631c552a9156bb2dac8ab49a5d2ad0dc1d2d626a7000114ae45b302bfa",
+      "spirv_hash": "90a3c0d5688b5c601917b2e0d5925e1f4dc0a1d743cbfc1c5e37fb08f21b7090",
       "stage": "compute"
     }
   ],

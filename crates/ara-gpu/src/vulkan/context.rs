@@ -1,3 +1,4 @@
+mod buffer_memory;
 mod create;
 mod resources;
 pub use resources::image_barrier;
@@ -116,8 +117,18 @@ pub struct DeviceInfo {
     pub vendor_id: u32,
     /// Device identity used by the pipeline cache.
     pub device_id: u32,
+    /// Discrete adapter classification; shared-memory integrated/CPU devices use
+    /// conservative raster auto-selection regardless of their reported heap size.
+    pub discrete: bool,
+    /// Sum of physical device-local heaps in MiB, recorded once at device creation.
+    pub device_local_mib: u64,
     /// Optional RT-tier support; the raster baseline never requires it.
     pub ray_tracing: bool,
+    /// Enabled BC4/BC5/BC6H/BC7 sampled textures, without CPU decompression.
+    pub texture_compression_bc: bool,
+    /// Allocated variable-count sampled-image slots at binding 5, capped at 65,536
+    /// and by the device's update-after-bind set, stage and pool limits.
+    pub sampled_image_capacity: u32,
     /// Enabled optional VK_EXT_mesh_shader mesh/task stages.
     pub mesh_shading: bool,
     /// Mesh indirect group limits: x, y, z, and the total group count.
@@ -152,6 +163,11 @@ pub struct DeviceInfo {
     pub timestamp_valid_bits: [u32; 2],
     /// Native driver pipeline-cache compatibility UUID.
     pub pipeline_cache_uuid: Vec<u8>,
+    /// Enabled `VK_KHR_external_memory_win32` (enabled whenever available):
+    /// shared surfaces can be exported and imported ([`super::external`]).
+    pub external_memory: bool,
+    /// Physical GPU and driver identity (`VkPhysicalDeviceIDProperties`).
+    pub identity: crate::shared::DeviceIdentity,
 }
 
 /// Owns the instance, queues, allocations and validation callback lifetime.
@@ -186,6 +202,7 @@ pub struct Gpu {
     debug: ash::ext::debug_utils::Instance,
     messenger: vk::DebugUtilsMessengerEXT,
     buffers: Vec<BufferAllocation>,
+    buffer_memory: buffer_memory::BufferMemory,
     images: Vec<ImageAllocation>,
     structures: Vec<vk::AccelerationStructureKHR>,
 }
@@ -275,6 +292,9 @@ impl Drop for Gpu {
             for buffer in &self.buffers {
                 self.device.destroy_buffer(buffer.handle, None);
                 self.device.free_memory(buffer.memory, None);
+            }
+            for memory in self.buffer_memory.drain() {
+                self.device.free_memory(memory, None);
             }
             self.device.destroy_command_pool(self.compute_pool, None);
             self.device.destroy_command_pool(self.graphics_pool, None);

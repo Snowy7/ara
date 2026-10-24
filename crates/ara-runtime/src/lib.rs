@@ -37,6 +37,7 @@
 //! the fixed-tick phase and never mutates the world.
 #![warn(missing_docs)]
 
+extern crate glam34 as glam;
 pub mod ai;
 pub mod animation;
 pub mod assets;
@@ -45,12 +46,15 @@ pub mod control;
 pub mod controller;
 pub mod engine;
 pub mod extract;
+pub mod follow;
 pub mod live;
+pub mod material;
 pub mod math;
 pub mod model;
 pub mod navigation;
 pub mod physics;
 pub mod plugin;
+mod preload;
 pub mod skin;
 pub mod sync;
 pub mod terrain;
@@ -198,6 +202,9 @@ fn register_components(registry: &mut SimRegistry) -> std::result::Result<(), Si
     registry.register_component::<MeshRenderer>()?;
     registry.register_component::<Light>()?;
     registry.register_component::<Environment>()?;
+    registry.register_component::<ara_components::render::SkyAtmosphere>()?;
+    registry.register_component::<ara_components::render::HeightFog>()?;
+    registry.register_component::<ara_components::render::PostProcess>()?;
     registry.register_component::<Camera>()?;
     registry.register_component::<FollowCamera>()?;
     registry.register_component::<PlayerControl>()?;
@@ -297,12 +304,14 @@ pub struct Runtime {
     mirror: Option<Schedule>,
     /// The authoritative tick a mirror world presents (its own session never steps).
     presented: Option<u64>,
+    asset_errors: Vec<String>,
 }
 
 impl Runtime {
-    /// Projects `scene` from `workspace`, loads every referenced model generation and
-    /// builds the complete world at tick 0, paused. Fails with a structured message
-    /// on schema, projection, asset, bake or physics errors.
+    /// Projects `scene` from `workspace`, preloads model generations reachable through
+    /// its prefabs, streamed cells and foliage, and builds the world at tick 0, paused.
+    /// Missing models use diagnosed
+    /// placeholders; schema, projection, bake and physics errors fail the build.
     pub fn new(
         schema: SchemaDb,
         workspace: Workspace,
@@ -314,6 +323,7 @@ impl Runtime {
         let hz = config.tick.hz;
         config.physics.fixed_dt = 1.0 / hz as f32;
         let baseline = workspace.clone();
+        let preload_models = preload::models(&baseline, &scene)?;
         let mut schema = schema;
         let mut world = World::new();
         for plugin in &mut plugins {
@@ -329,28 +339,39 @@ impl Runtime {
             Session::local(edit, config.tick, config.seed, control::default_actions())?;
         let world = session.world_mut();
         let mut library = Library::default();
-        let mut models = BTreeSet::new();
+        let mut models = preload_models;
         let mut query = world.query::<&MeshRenderer>();
         for renderer in query.iter(world) {
             if let Some(model) = &renderer.model {
                 models.insert(asset_id(model)?.to_owned());
             }
         }
-        // Models of every document too: streamed world cells spawn entities after
-        // build, and decoding never happens inside a tick.
-        for (_, doc) in baseline.docs() {
-            for record in doc.records().values() {
-                if let Some(model) = record
-                    .get("MeshRenderer")
-                    .and_then(|r| r.get("model"))
-                    .and_then(serde_json::Value::as_str)
-                {
-                    models.insert(asset_id(&ara_schema::AssetRef(model.to_owned()))?.to_owned());
-                }
+        let mut query = world.query::<&ara_physics::Collider>();
+        for collider in query.iter(world) {
+            if matches!(
+                collider.kind,
+                ara_physics::ColliderKind::ModelConvex | ara_physics::ColliderKind::ModelMesh
+            ) && let Some(asset) = &collider.asset
+            {
+                models.insert(asset_id(asset)?.to_owned());
             }
         }
+        let mut asset_errors = Vec::new();
         for model in &models {
-            library.models.load(assets.as_ref(), model)?;
+            if let Err(error) = library.models.load(assets.as_ref(), model) {
+                asset_errors.push(format!(
+                    "ARA7310: {error}; showing placeholder geometry; re-import the asset"
+                ));
+            }
+        }
+        asset_errors.extend(library.models.validate_renderers(&baseline));
+        for material in material::references(&baseline)? {
+            if let Err(error) = library
+                .materials
+                .load(&baseline, assets.as_ref(), &material)
+            {
+                asset_errors.push(format!("ARA7310: {error}; retaining the source material"));
+            }
         }
         library.documents = controller::Documents::load(&baseline)?;
         world.insert_resource(library);
@@ -472,12 +493,26 @@ impl Runtime {
             pending: None,
             mirror: None,
             presented: None,
+            asset_errors,
         })
     }
 
     /// The authoring schema this world was projected with.
     pub fn schema(&self) -> &SchemaDb {
         &self.schema
+    }
+
+    /// Asset-load diagnostics; missing models render as placeholders and can recover
+    /// on a later asset reload without restarting the simulation.
+    pub fn asset_errors(&self) -> &[String] {
+        &self.asset_errors
+    }
+
+    /// Asset-load warnings for the player's owner and diagnostics console.
+    pub fn asset_diagnostics(&self) -> impl Iterator<Item = ara_diag::Diagnostic> + '_ {
+        self.asset_errors
+            .iter()
+            .map(|message| ara_diag::Diagnostic::warning(ara_diag::Code(7310), message))
     }
 
     /// The documents as projected at tick 0 (scene, prefabs, animation, mixer, music).
@@ -617,6 +652,52 @@ impl Runtime {
     /// Queues committed authoring ops for the next tick boundary (live patch). The
     /// ops must match the projection baseline (`prev` values), like any transaction.
     pub fn patch(&mut self, ops: Vec<Op>) -> Result<()> {
+        let mut models = BTreeSet::new();
+        for op in &ops {
+            match op {
+                Op::Set {
+                    path,
+                    value: Some(value),
+                    ..
+                } => {
+                    assets::model_references(&path.to_string(), value, &mut models)?;
+                    preload::extend(&self.baseline, value, &mut models)?;
+                }
+                Op::Create { record, .. } => {
+                    for (key, value) in record {
+                        assets::model_references(key, value, &mut models)?;
+                        preload::extend(&self.baseline, value, &mut models)?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        for asset in models {
+            if let Err(error) = self
+                .play
+                .session_mut()
+                .world_mut()
+                .resource_mut::<Library>()
+                .models
+                .load(self.assets.as_ref(), &asset)
+            {
+                self.asset_errors.push(format!("ARA7310: {asset}: {error}"));
+            }
+        }
+        // Resolve newly referenced material assets on this control boundary, never
+        // from frame extraction. Existing entries survive a failed preparation.
+        for asset in material::patch_references(&ops) {
+            let result = self
+                .play
+                .session_mut()
+                .world_mut()
+                .resource_mut::<Library>()
+                .materials
+                .load(&self.baseline, self.assets.as_ref(), &asset);
+            if let Err(error) = result {
+                self.asset_errors.push(format!("ARA7310: {asset}: {error}"));
+            }
+        }
         let next = self.tick() + 1;
         let transaction = ara_ops::Transaction {
             id: ara_ops::TxnId("tx_livepatch".into()),
@@ -799,6 +880,20 @@ impl Runtime {
                 world.entity_mut(entity).remove::<AnimatorSlot>();
             }
             animation::ensure_slots(world, self.hz)?;
+        }
+        let material_ids: Vec<_> = world
+            .resource::<Library>()
+            .materials
+            .ids()
+            .map(str::to_owned)
+            .collect();
+        for id in material_ids {
+            let result = world
+                .resource_mut::<Library>()
+                .materials
+                .load(&self.baseline, self.assets.as_ref(), &id)
+                .map_err(|error| error.0);
+            results.push((id, result));
         }
         Ok(results)
     }

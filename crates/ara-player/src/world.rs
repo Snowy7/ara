@@ -11,7 +11,7 @@ use ara_render::capture::ViewMode;
 use ara_runtime::{
     Runtime, RuntimeConfig, assets::CachedAssets, extract::RenderFrame, live::set_edit,
 };
-use ara_runtime_audio::AudioPresenter;
+use ara_runtime_audio::{AssetVoices, AudioPresenter, STREAM_BUDGET, StreamMode};
 use ara_runtime_render::{
     Presenter,
     two_d::{self, Presenter2d},
@@ -51,6 +51,7 @@ pub struct World {
     seed: u64,
     cache: PathBuf,
     pins: BTreeMap<String, Digest>,
+    packed: Option<Arc<dyn ara_runtime::assets::AssetSource>>,
     /// Patches acknowledged after their tick.
     pub pending: Vec<PendingPatch>,
     /// C# modules and their host's event channel, when the scene runs any.
@@ -72,6 +73,31 @@ fn assets(cache: &PathBuf, pins: &BTreeMap<String, Digest>) -> Result<CachedAsse
 }
 
 impl World {
+    /// Resolves a new render-content generation; ordinary motion never calls this.
+    pub fn fidelity_content(
+        &self,
+        frame: &RenderFrame,
+    ) -> Result<ara_runtime_render::fidelity::native::Content> {
+        let cached;
+        let source = if let Some(source) = &self.packed {
+            source.as_ref()
+        } else {
+            cached = assets(&self.cache, &self.pins)?;
+            &cached
+        };
+        let library = self
+            .runtime
+            .world()
+            .get_resource::<ara_runtime::animation::Library>()
+            .context("runtime animation/material library missing")?;
+        ara_runtime_render::fidelity::native::Content::resolve(
+            frame,
+            self.runtime.documents(),
+            self.runtime.schema(),
+            library,
+            source,
+        )
+    }
     /// Builds the world from a decoded snapshot (tick 0, paused) in its role: networked
     /// worlds copy player avatars, install the net plugin and wrap the runtime in a
     /// server (authorities) or connect a mirror (clients). Headless worlds settle world
@@ -81,10 +107,45 @@ impl World {
         role: ara_play::Role,
         net: Option<&ara_play::NetStart>,
         windowed: bool,
+        prewarmed: Option<(ScriptPlugin, std::sync::mpsc::Receiver<ScriptEvent>)>,
     ) -> Result<(Self, f64)> {
+        Self::build_with_source(scene, role, net, windowed, prewarmed, None)
+    }
+
+    /// Builds the same local runtime over immutable shipped generations.
+    pub fn build_packed(
+        scene: &PlayScene,
+        source: Arc<dyn ara_runtime::assets::AssetSource>,
+        windowed: bool,
+    ) -> Result<(Self, f64)> {
+        Self::build_with_source(
+            scene,
+            ara_play::Role::Local,
+            None,
+            windowed,
+            None,
+            Some(source),
+        )
+    }
+
+    fn build_with_source(
+        scene: &PlayScene,
+        role: ara_play::Role,
+        net: Option<&ara_play::NetStart>,
+        windowed: bool,
+        prewarmed: Option<(ScriptPlugin, std::sync::mpsc::Receiver<ScriptEvent>)>,
+        packed: Option<Arc<dyn ara_runtime::assets::AssetSource>>,
+    ) -> Result<(Self, f64)> {
+        ara_gpu::cpu_scope!("Player.world_build");
         let started = Instant::now();
-        let schema = ara_runtime::schema(&scene.types)?;
-        let (mut workspace, id) = scene.workspace().map_err(|e| anyhow!(e))?;
+        let schema = {
+            ara_gpu::cpu_scope!("Player.schema");
+            ara_runtime::schema(&scene.types)?
+        };
+        let (mut workspace, id) = {
+            ara_gpu::cpu_scope!("Player.scene_workspace");
+            scene.workspace().map_err(|e| anyhow!(e))?
+        };
         if let Some(net) = net {
             ara_runtime_net::avatars(&mut workspace, id.as_str(), net.players)
                 .map_err(|e| anyhow!(e))?;
@@ -106,7 +167,22 @@ impl World {
                 compile_server: s.compile_server.as_ref().map(PathBuf::from),
                 modules: s.modules.iter().map(PathBuf::from).collect(),
             };
-            let (plugin, events) = ScriptPlugin::new(settings.clone());
+            let (plugin, events) = match prewarmed {
+                Some((plugin, events))
+                    if s.host == ara_play::ScriptHost::Development && plugin.matches(&settings) =>
+                {
+                    (plugin, events)
+                }
+                other => {
+                    drop(other);
+                    match &s.host {
+                        ara_play::ScriptHost::Development => ScriptPlugin::new(settings.clone()),
+                        ara_play::ScriptHost::NativeAot { manifest } => {
+                            ScriptPlugin::shipping(manifest)
+                        }
+                    }
+                }
+            };
             plugins.push(Box::new(plugin));
             scripts = Some((settings, events));
         }
@@ -132,23 +208,33 @@ impl World {
                 resident: Default::default(),
             });
         }
-        let runtime = Runtime::new(
-            schema,
-            workspace,
-            id.clone(),
-            Box::new(assets(&cache, &pins)?),
-            RuntimeConfig {
-                tick: TickConfig {
-                    hz: scene.tick_hz,
+        let source: Box<dyn ara_runtime::assets::AssetSource> = match &packed {
+            Some(source) => Box::new(crate::packed::SharedAssets(Arc::clone(source))),
+            None => Box::new(assets(&cache, &pins)?),
+        };
+        let runtime = {
+            ara_gpu::cpu_scope!("Player.runtime_new");
+            Runtime::new(
+                schema,
+                workspace,
+                id.clone(),
+                source,
+                RuntimeConfig {
+                    tick: TickConfig {
+                        hz: scene.tick_hz,
+                        ..Default::default()
+                    },
+                    seed: scene.seed,
+                    nav_cache: scene.nav_cache.as_ref().map(PathBuf::from),
                     ..Default::default()
                 },
-                seed: scene.seed,
-                nav_cache: scene.nav_cache.as_ref().map(PathBuf::from),
-                ..Default::default()
-            },
-            plugins,
-        )?;
+                plugins,
+            )?
+        };
         let runtime = Play::new(runtime, role, net)?;
+        for error in runtime.asset_errors() {
+            eprintln!("{error}");
+        }
         Ok((
             Self {
                 runtime,
@@ -157,6 +243,7 @@ impl World {
                 seed: scene.seed,
                 cache,
                 pins,
+                packed,
                 pending: Vec::new(),
                 scripts,
                 cells,
@@ -176,6 +263,9 @@ impl World {
 
     /// The asset source of the current pins, shared with presentation workers.
     pub fn asset_source(&self) -> Result<Arc<dyn ara_runtime::assets::AssetSource>> {
+        if let Some(source) = &self.packed {
+            return Ok(Arc::clone(source));
+        }
         Ok(Arc::new(assets(&self.cache, &self.pins)?))
     }
 
@@ -212,13 +302,22 @@ impl World {
     pub fn audio_inputs(&mut self) -> Result<AudioInputs> {
         Ok(AudioInputs {
             resident: self.resident_acoustics(),
-            assets: self.asset_source()?,
+            assets: if self.packed.is_some() {
+                None
+            } else {
+                Some(self.asset_source()?)
+            },
         })
     }
 
     /// A fresh audio presenter for this world (its project mixer, room reverb).
-    pub fn audio_presenter(&self) -> Result<AudioPresenter> {
-        Ok(AudioPresenter::new(self.runtime.documents())?)
+    pub fn audio_presenter(&self) -> Result<Audio> {
+        let assets = self.asset_source()?;
+        Ok(Audio {
+            presenter: AudioPresenter::new(self.runtime.documents())?,
+            voices: AssetVoices::new(Arc::clone(&assets), StreamMode::Live, STREAM_BUDGET),
+            assets,
+        })
     }
 
     /// `play.captureAudio`: renders `seconds` of the world's sound offline from the
@@ -230,17 +329,20 @@ impl World {
         params: &ara_play::CaptureAudio,
         frame: &mut RenderFrame,
     ) -> Result<Value> {
-        let mut audio = self.audio_presenter()?;
+        let mut audio = AudioPresenter::new(self.runtime.documents())?;
         self.runtime.extract(frame);
         let listener = listener(frame);
         let AudioInputs { resident, assets } = self.audio_inputs()?;
+        let assets = match assets {
+            Some(assets) => assets,
+            None => self.asset_source()?,
+        };
         let probes = audio.stream_cells(&resident, &assets);
         audio.wait_cells(std::time::Duration::from_secs(5));
         let probes = probes.max(audio.stream_cells(&resident, &assets));
-        let heard = audio.update(self.runtime.world(), &listener, &mut |reference| {
-            ara_runtime_audio::clip(assets.as_ref(), reference)
-        })?;
-        let capture = audio.capture(params.seconds)?;
+        let mut voices = AssetVoices::new(assets, StreamMode::Offline, STREAM_BUDGET);
+        let heard = audio.update_voices(self.runtime.world(), &listener, &mut voices)?;
+        let capture = audio.capture_streamed(params.seconds, &mut voices)?;
         let path = std::path::Path::new(&params.path);
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
@@ -544,10 +646,11 @@ impl World {
             let size = [params.width, params.height];
             let marks_wanted = (params.marks > 0).then_some(params.marks);
             let tick = self.runtime.tick();
+            let source = self.asset_source()?;
             let world = self.runtime.play_mut().session_mut().world_mut();
             // A Camera2d makes it a 2D scene: ara-render2d draws it.
             let capture = if two_d::camera(world).is_some() {
-                let atlases = two_d::atlases(world, &assets(&self.cache, &self.pins)?)?;
+                let atlases = two_d::atlases(world, source.as_ref())?;
                 presenter2d.context("no 2D presenter")?.capture(
                     world,
                     atlases,
@@ -556,22 +659,22 @@ impl World {
                     marks_wanted,
                     self.seed,
                 )?
-            } else if params.presented {
-                self.runtime.extract(frame);
-                presenter.context("no presenter")?.capture_presented(
-                    frame,
-                    size,
-                    marks_wanted,
-                    self.seed,
-                )?
             } else {
                 self.runtime.extract(frame);
-                presenter.context("no presenter")?.capture(
+                presenter.context("no presenter")?.capture_with(
                     frame,
-                    size,
-                    ViewMode::Lit,
-                    marks_wanted,
-                    self.seed,
+                    &ara_render::capture::CaptureRequest {
+                        camera: ara_runtime_render::camera(frame)?,
+                        size,
+                        mode: ViewMode::Lit,
+                        deterministic: true,
+                        exposure: frame.environment.exposure,
+                        settle_frames: 16,
+                        tick: frame.tick,
+                        seed: self.seed,
+                        marks: marks_wanted,
+                    },
+                    || self.fidelity_content(frame),
                 )?
             };
             capture.write(std::path::Path::new(path))?;
@@ -614,6 +717,10 @@ impl World {
 
     /// `play.assets`: pins new generations and reloads them at this boundary.
     pub fn assets(&mut self, pins: &BTreeMap<String, String>) -> Result<Value> {
+        anyhow::ensure!(
+            self.packed.is_none(),
+            "shipped asset generations are immutable"
+        );
         for (id, digest) in pins {
             self.pins
                 .insert(id.clone(), Digest(unhex(digest).map_err(|e| anyhow!(e))?));
@@ -648,22 +755,49 @@ pub struct AudioInputs {
     /// Resident streamed cells with baked acoustics (cell, `Cell.acoustics`).
     pub resident: Vec<(String, AssetRef)>,
     /// Clips, graphs and probes resolve through the current pins.
-    pub assets: Arc<dyn ara_runtime::assets::AssetSource>,
+    pub assets: Option<Arc<dyn ara_runtime::assets::AssetSource>>,
+}
+
+/// Live Play audio and its bounded compressed-asset producers. Dropped on the
+/// control path; decoder workers never join inside the mixer callback.
+pub struct Audio {
+    presenter: AudioPresenter,
+    voices: AssetVoices,
+    assets: Arc<dyn ara_runtime::assets::AssetSource>,
+}
+
+impl Audio {
+    /// Feeds the live device after the control worker has updated voices.
+    pub fn pump(
+        &mut self,
+        backend: &mut dyn ara_audio::device::DeviceBackend,
+        target_frames: usize,
+    ) -> ara_runtime_audio::Result<ara_audio::device::DeviceEvent> {
+        self.presenter.pump(backend, target_frames)
+    }
 }
 
 /// One live audio update: streams cell probes, then evaluates acoustics against the
 /// physics scene and retargets voices. Reads the simulation only, so the player runs
 /// it on a worker thread while the frame presents (physics is not stepping then).
 pub fn update_audio(
-    audio: &mut AudioPresenter,
+    audio: &mut Audio,
     world: &ara_sim::bevy_ecs::world::World,
     listener: &ara_audio::AudioListener,
     inputs: &AudioInputs,
 ) -> Result<()> {
-    audio.stream_cells(&inputs.resident, &inputs.assets);
-    audio.update(world, listener, &mut |reference| {
-        ara_runtime_audio::clip(inputs.assets.as_ref(), reference)
-    })?;
+    ara_gpu::cpu_scope!("Player.audio.update");
+    audio.presenter.stream_cells(
+        &inputs.resident,
+        inputs.assets.as_ref().unwrap_or(&audio.assets),
+    );
+    if let Some(assets) = &inputs.assets {
+        audio.voices.set_assets(Arc::clone(assets));
+    }
+    audio.voices.refill()?;
+    audio
+        .presenter
+        .update_voices(world, listener, &mut audio.voices)?;
     Ok(())
 }
 

@@ -62,9 +62,18 @@ pub struct Ui {
     /// Display-list index where each `paint_order` node's commands begin, so hosts
     /// can splice paint-time decorations beneath later layers (menus, dialogs).
     pub paint_starts: Vec<usize>,
+    /// Stable ID -> node index for `find`/`by_id`; rebuilt lazily when nodes change.
+    index: std::cell::RefCell<std::collections::HashMap<u64, usize>>,
+    /// `nodes.len()` when `index` was built; `usize::MAX` forces a rebuild.
+    indexed: std::cell::Cell<usize>,
+    /// Editor surfaces reject raw colors in inline styles (D18), on reconcile too.
+    pub(crate) editor_checks: bool,
+    /// What `reconcile_parts` remembers between calls (part markup, index moves).
+    pub(crate) parts: crate::reconcile::Parts,
 }
-/// Actual incremental work counters for profiling and focused tests.
-#[derive(Default, Debug, Serialize)]
+/// Actual incremental work counters for profiling and focused tests; `+=` sums
+/// several frames (a host's per-frame budget).
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Work {
     /// Nodes whose cascade was reevaluated.
     pub restyled: usize,
@@ -74,6 +83,14 @@ pub struct Work {
     pub shaped: usize,
     /// Retained nodes visited during display-list rebuilding.
     pub paint_nodes: usize,
+}
+impl std::ops::AddAssign for Work {
+    fn add_assign(&mut self, other: Self) {
+        self.restyled += other.restyled;
+        self.layout_passes += other.layout_passes;
+        self.shaped += other.shaped;
+        self.paint_nodes += other.paint_nodes;
+    }
 }
 impl Ui {
     /// Parse and eagerly validate all native syntax before creating runtime state.
@@ -88,7 +105,7 @@ impl Ui {
         tokens: std::collections::BTreeMap<String, String>,
     ) -> Result<Self> {
         if size.iter().any(|n| !n.is_finite() || *n <= 0.0) {
-            return Err("ARA7040: invalid viewport".into());
+            return Err("ARA4040: invalid viewport".into());
         }
         let elements = source::compile(markup)?;
         let sheet = Sheet::with_tokens(css, tokens)?;
@@ -96,29 +113,7 @@ impl Ui {
         let mut tree = TaffyTree::new();
         let mut nodes = Vec::new();
         for (i, element) in elements.into_iter().enumerate() {
-            let state = State {
-                disabled: element.attrs.get("disabled").is_some_and(|v| v == "true"),
-                ..State::default()
-            };
-            let computed = sheet.compute(&element, state)?;
-            let text = element.attrs.get("text").map(|v| Text::new(v.to_owned()));
-            let layout_id = tree.new_leaf_with_context(computed.layout.clone(), i)?;
-            nodes.push(Node {
-                paint_offset: [0.0; 2],
-                visible: true,
-                element,
-                computed,
-                state,
-                layout_id,
-                text,
-                dirty: Dirty {
-                    style: false,
-                    layout: true,
-                    paint: true,
-                },
-                rect: Box2::default(),
-                clip: Box2::default(),
-            });
+            nodes.push(build_node(&mut tree, &sheet, element, i)?);
         }
         for node in &nodes {
             let children: Vec<_> = node
@@ -140,11 +135,53 @@ impl Ui {
             size,
             paint_order: Vec::new(),
             paint_starts: Vec::new(),
+            index: Default::default(),
+            indexed: std::cell::Cell::new(usize::MAX),
+            editor_checks: false,
+            parts: Default::default(),
         })
     }
     /// Resolve an authored ID without panicking when the node is absent.
     pub fn find(&self, id: &str) -> Option<usize> {
-        self.nodes.iter().position(|n| n.element.id == id)
+        self.lookup(stable_id(id), |n| n.element.id == id)
+    }
+    /// Whether the node is laid out and painted as of the last frame: neither it nor an
+    /// ancestor is hidden (`set_visible`, `display:none`). A hidden node keeps its
+    /// subtree and state, but its geometry is stale.
+    pub fn shown(&self, index: usize) -> bool {
+        let mut at = Some(index);
+        while let Some(i) = at {
+            let Some(node) = self.nodes.get(i) else {
+                return false;
+            };
+            if !node.visible || node.computed.layout.display == Display::None {
+                return false;
+            }
+            at = node.element.parent;
+        }
+        true
+    }
+    /// The node indexed under `key` that passes `is`. The index is rebuilt when nodes
+    /// were added or a hit is stale (virtual rows rename their nodes in place).
+    pub(crate) fn lookup(&self, key: u64, is: impl Fn(&Node) -> bool) -> Option<usize> {
+        if self.indexed.get() == self.nodes.len() {
+            match self.index.borrow().get(&key) {
+                Some(&i) if self.nodes.get(i).is_some_and(&is) => return Some(i),
+                None => return None,
+                Some(_) => {}
+            }
+        }
+        let mut index = self.index.borrow_mut();
+        index.clear();
+        for (i, n) in self.nodes.iter().enumerate() {
+            index.entry(stable_id(&n.element.id)).or_insert(i);
+        }
+        self.indexed.set(self.nodes.len());
+        index.get(&key).copied().filter(|i| is(&self.nodes[*i]))
+    }
+    /// Forget the ID index (after renaming nodes in place).
+    pub(crate) fn invalidate_index(&self) {
+        self.indexed.set(usize::MAX);
     }
     /// Push a changed display/model value, invalidating only the affected text and geometry.
     pub fn set_text(&mut self, index: usize, value: &str) -> Result<()> {
@@ -160,7 +197,7 @@ impl Ui {
         let node = self
             .nodes
             .get_mut(index)
-            .ok_or("ARA7040: invalid node handle")?;
+            .ok_or("ARA4040: invalid node handle")?;
         let text = node.text.as_mut().ok_or("node is not a text control")?;
         if text.set(value) {
             node.dirty.layout = true;
@@ -214,6 +251,39 @@ impl Ui {
         }).collect();
         serde_json::json!({"viewport":self.size,"nodes":nodes,"focus_graph":crate::input::focus_graph(self),"batch_breaks":self.display.breaks(),"commands":self.display.commands.len(),"glyphs":self.display.glyphs.len()})
     }
+}
+/// A retained node for `element` at `index`, styled and with a Taffy leaf; its layout
+/// and paint are dirty, and its style too when it inherits its parent's color (the
+/// first frame resolves that, parents first).
+pub(crate) fn build_node(
+    tree: &mut TaffyTree<usize>,
+    sheet: &Sheet,
+    element: Element,
+    index: usize,
+) -> Result<Node> {
+    let state = State {
+        disabled: element.attrs.get("disabled").is_some_and(|v| v == "true"),
+        ..State::default()
+    };
+    let computed = sheet.compute(&element, state)?;
+    let text = element.attrs.get("text").map(|v| Text::new(v.to_owned()));
+    let layout_id = tree.new_leaf_with_context(computed.layout.clone(), index)?;
+    Ok(Node {
+        paint_offset: [0.0; 2],
+        visible: true,
+        element,
+        dirty: Dirty {
+            style: computed.inherit_color,
+            layout: true,
+            paint: true,
+        },
+        computed,
+        state,
+        layout_id,
+        text,
+        rect: Box2::default(),
+        clip: Box2::default(),
+    })
 }
 /// Native UI is focusable.
 pub fn is_focusable(n: &Node) -> bool {

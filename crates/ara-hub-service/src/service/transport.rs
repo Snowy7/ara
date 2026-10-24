@@ -25,16 +25,18 @@ impl Handler for Hub {
         self.subscribers.remove(&conn);
     }
     fn tick(&mut self) {
-        for child in self.children.values_mut() {
-            let _ = child.try_wait();
-        }
-        if self.subscribers.is_empty() {
+        self.poll_updates();
+        self.poll_processes();
+        if self.subscribers.is_empty()
+            || self.processes.running.is_empty()
+            || self.last_activity_check.elapsed() < Duration::from_secs(2)
+        {
             return;
         }
-        let status = self.call("hub.status", json!({}));
+        self.last_activity_check = Instant::now();
         let activity = self.call("hub.activity", json!({}));
-        if let (Ok(status), Ok(activity)) = (status, activity) {
-            let state = json!({"projects":status["projects"],"activity":activity["activity"]});
+        if let Ok(activity) = activity {
+            let state = activity["activity"].clone();
             if self.last_status != state {
                 self.last_status = state;
                 self.changed("activity", None);
@@ -80,6 +82,8 @@ pub fn serve(config: HubConfig, port: u16) -> Result<(), RpcError> {
 
 /// Connect to the user Hub, auto-starting `ara hub serve` with a hidden process on demand.
 pub fn connect_or_start(directory: &Path, executable: &Path) -> Result<Client, RpcError> {
+    crate::validate_development_config(directory).map_err(io_error)?;
+    crate::isolation::validate_engine(directory, executable).map_err(io_error)?;
     let discovery = directory.join("hub");
     if let Some(client) = Client::for_project(&discovery) {
         return Ok(client);

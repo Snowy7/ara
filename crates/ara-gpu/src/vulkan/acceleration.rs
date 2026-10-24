@@ -1,12 +1,15 @@
 use super::*;
-use crate::acceleration::AccelerationDesc;
+use crate::acceleration::{AccelerationDesc, TriangleRange};
+mod triangles;
 
 enum Geometry {
     Triangles {
         vertices: Buffer,
+        vertex_offset: u64,
         vertex_count: u32,
         stride: u64,
         indices: Buffer,
+        index_offset: u64,
         index_count: u32,
     },
     Instances {
@@ -16,6 +19,8 @@ enum Geometry {
 }
 pub(super) struct NativeAcceleration {
     pub handle: vk::AccelerationStructureKHR,
+    /// BLAS address is stable for this object's lifetime, including before build.
+    address: vk::DeviceAddress,
     pub backing: BufferAllocation,
     pub scratch: Buffer,
     pub dependencies: Vec<AccelerationStructure>,
@@ -30,6 +35,7 @@ impl VulkanDevice {
         &mut self,
         desc: &AccelerationDesc,
     ) -> Result<AccelerationStructure> {
+        crate::cpu_scope!("GPU.allocate_acceleration_structure");
         if !self.context.info.ray_tracing {
             return Err(GpuError::Contract(
                 "RT-tier acceleration structures are unavailable".into(),
@@ -44,33 +50,16 @@ impl VulkanDevice {
                 vertex_stride,
                 indices,
                 index_count,
-            } => {
-                let v = self.buffers.get(*vertices)?.raw;
-                let i = self.buffers.get(*indices)?.raw;
-                let usage = vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
-                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
-                if *vertex_count == 0
-                    || *index_count == 0
-                    || index_count % 3 != 0
-                    || *vertex_stride < 12
-                    || vertex_stride % 4 != 0
-                    || !v.usage.contains(usage)
-                    || !i.usage.contains(usage)
-                    || u64::from(*vertex_count)
-                        .checked_mul(*vertex_stride)
-                        .is_none_or(|n| n > v.size)
-                    || u64::from(*index_count) * 4 > i.size
-                {
-                    return Err(GpuError::Contract("Invalid triangle AS input".into()));
-                }
-                Geometry::Triangles {
-                    vertices: *vertices,
-                    vertex_count: *vertex_count,
-                    stride: *vertex_stride,
-                    indices: *indices,
-                    index_count: *index_count,
-                }
-            }
+            } => self.triangle_input(TriangleRange {
+                vertices: *vertices,
+                vertex_offset: 0,
+                vertex_count: *vertex_count,
+                vertex_stride: *vertex_stride,
+                indices: *indices,
+                index_offset: 0,
+                index_count: *index_count,
+            })?,
+            AccelerationDesc::TriangleRange(range) => self.triangle_input(*range)?,
             AccelerationDesc::Instances(instances) => {
                 if instances.is_empty() {
                     return Err(GpuError::Contract("Empty TLAS".into()));
@@ -84,15 +73,6 @@ impl VulkanDevice {
                     {
                         return Err(GpuError::Contract("Invalid TLAS instance".into()));
                     }
-                    // SAFETY: Allocated BLAS belongs to this device; address is stable before and after build.
-                    let address = unsafe {
-                        self.context
-                            .acceleration
-                            .get_acceleration_structure_device_address(
-                                &vk::AccelerationStructureDeviceAddressInfoKHR::default()
-                                    .acceleration_structure(blas.raw.handle),
-                            )
-                    };
                     native.push(vk::AccelerationStructureInstanceKHR {
                         transform: vk::TransformMatrixKHR {
                             matrix: instance.transform,
@@ -107,7 +87,7 @@ impl VulkanDevice {
                                 as u8,
                         ),
                         acceleration_structure_reference: vk::AccelerationStructureReferenceKHR {
-                            device_handle: address,
+                            device_handle: blas.raw.address,
                         },
                     });
                     dependencies.push(instance.geometry);
@@ -162,9 +142,24 @@ impl VulkanDevice {
         let (handle, backing) = self
             .context
             .structure(sizes.acceleration_structure_size, kind)?;
+        let address = if matches!(&geometry, Geometry::Triangles { .. }) {
+            // SAFETY: This live BLAS and its backing allocation belong to the device.
+            // Vulkan keeps the address valid until that same object is destroyed.
+            unsafe {
+                self.context
+                    .acceleration
+                    .get_acceleration_structure_device_address(
+                        &vk::AccelerationStructureDeviceAddressInfoKHR::default()
+                            .acceleration_structure(handle),
+                    )
+            }
+        } else {
+            0
+        };
         self.accelerations.insert(Owned {
             raw: NativeAcceleration {
                 handle,
+                address,
                 backing,
                 scratch,
                 geometry,
@@ -205,9 +200,11 @@ impl VulkanDevice {
         Ok(match *geometry {
             Geometry::Triangles {
                 vertices,
+                vertex_offset,
                 vertex_count,
                 stride,
                 indices,
+                index_offset,
                 index_count,
             } => (
                 vk::AccelerationStructureGeometryKHR::default()
@@ -217,17 +214,13 @@ impl VulkanDevice {
                         triangles: vk::AccelerationStructureGeometryTrianglesDataKHR::default()
                             .vertex_format(vk::Format::R32G32B32_SFLOAT)
                             .vertex_data(vk::DeviceOrHostAddressConstKHR {
-                                device_address: self
-                                    .context
-                                    .address(self.buffers.get(vertices)?.raw),
+                                device_address: self.range_address(vertices, vertex_offset)?,
                             })
                             .vertex_stride(stride)
                             .max_vertex(vertex_count - 1)
                             .index_type(vk::IndexType::UINT32)
                             .index_data(vk::DeviceOrHostAddressConstKHR {
-                                device_address: self
-                                    .context
-                                    .address(self.buffers.get(indices)?.raw),
+                                device_address: self.range_address(indices, index_offset)?,
                             }),
                     }),
                 index_count / 3,

@@ -2,8 +2,11 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+/// Math types shared by animation assets and consumers.
+pub extern crate glam34 as glam;
 #[cfg(test)]
 mod codec_tests;
+pub mod commands;
 mod compile;
 mod compression;
 mod controller;
@@ -27,7 +30,6 @@ mod skeleton;
 
 pub use compression::{CompressionReport, CompressionSettings, CookedClip};
 pub use controller::{Animator, Controller, Event, Snapshot};
-pub use glam;
 pub use pose::{Pose, RootMotion, Transform};
 pub use sampling::Sampler;
 pub use skeleton::Skeleton;

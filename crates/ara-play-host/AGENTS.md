@@ -10,23 +10,52 @@ when it becomes the daemon) and by the editor (`Editor::open`). Depends on ara-h
 - `PlayService::new(root, PlayConfig)`; `PlayConfig::for_project(root)` finds
   `ara-player`/`ara-import-worker` next to the current executable (or `ARA_PLAYER`,
   `ARA_IMPORT_WORKER`), the .NET host (`ScriptPaths::locate`: `ARA_DOTNET_ARTIFACTS`
-  or the nearest `dotnet/artifacts/bin`); two warm headless players, no warm window.
+  or the nearest `dotnet/artifacts/bin`; installed tools beside the executable take
+  precedence); two warm headless players, no warm window.
 - `open_project(root)`: opens a project with the engine schema world and commands
   (`ara_runtime::engine`) for a host before `Host::open`; clashes become diagnostics.
 - `pool::{Pool, PoolConfig, Player}`: pre-spawned single-use players (S5), token-
   checked hellos, heartbeat watchdog (`WATCHDOG` = 1 s), fault classification.
+  `Pool::with_scripts` passes module settings for pre-warm before the ready hello.
+  Local crash artifacts go beside player logs in `crashes/`; a clean window close
+  stops and reaps the whole Play world without reporting a crash.
 - `assets::Assets`: every `*.import.json` registered with `ara_asset::AssetPipeline`
   (imports in worker processes, non-progressive); `pins` waits for published
   generations, which are always persisted final-preset cooks players can load.
+  `synchronize` follows in-memory import document revisions, including imports made
+  after the pipeline started. New Play pins wait for pending configured generations;
+  failed cooks retain the last good generation and report their existing diagnostic.
+- `package_scene_with_progress`: export snapshots wait on completed-cook progress,
+  not a total deadline. `ARA_EXPORT_COOK_STALL_SECONDS` defaults to 600; completion
+  counts and five-second heartbeats flow to the export job, pending IDs name stalls.
+- `package_scene_for_export` retains that cook/progress contract while taking an
+  explicit shipping script selection, without discovering dev hosts or compilers.
+- `PlayService::published` / `PublishedAssets::for_project`: acquire a read-only
+  project attachment once. Frame loops read its atomic revision; `snapshot` never
+  waits and retains immutable generation IDs, kinds and FileCache provenance.
+  Readers cannot initialize/cook/import; only completed owner boundaries publish.
+  `cargo test -p ara-play-host --test published` holds a real import pending while
+  checking completed generations and retained-snapshot immutability.
 - `codes`: ARA7300 play, 7301 player fault, 7302 unknown world, 7303 assets (real
   import failures only), 7304 test failed, 7305 bad request, 7306 info: a sidecar
   recorded an older importer; it was upgraded (typed `SidecarCommand::Version`
-  transaction, canonical write) and reimported. Local range; reserve centrally later.
+  transaction, canonical write) and reimported, 7307 embedded surface failed.
+  Local range; reserve centrally later.
+- `embed` (D19 Game view): `PlayService::surfaces() -> Surfaces`, taken before the
+  host registers the service (the editor's in-process API, no JSON): `poll()` once
+  per frame after the host tick, `surfaces(world) -> Vec<SurfaceState { player,
+  generation, size, surface: &SharedSurface, latest }>`, `take(world, player)` (the
+  caller holds it), `release(world, player, frame)` after its GPU stopped sampling,
+  `device(world, player, Vec<DeviceEvent>)`, `resize(world, player, w, h)` (async; a
+  new generation arrives through `poll`), `take_timings()`. `EmbedParams`,
+  `DeviceEvent`, `method` (wire names mirrored by ara-player; its unit test checks).
 
 ## Methods
 
-`play.start {scene?, mode local|host|dedicated, clients, window, startPaused, seed,
-tickHz, hotReload}` → `{world: "play:N", players[], bootMs, prepareMs, transport}`;
+`play.start {scene?, mode local|host|dedicated, clients, window, embed?: {width, height,
+maxFps?}, startPaused, seed, tickHz, hotReload}` → `{world: "play:N", players[{role,
+pid, started, surface?}], bootMs, prepareMs, transport}`; `device {player, events}`
+(raw input to one embedded player), `resize {player, width, height}` → `{surface}`;
 `stop`, `pause`, `resume`, `step`, `until`, `input`, `timescale`, `inspect`, `read`,
 `patch` (acked after the applying tick), `capture` (hash, optional labelled PNG),
 `watch`, `record`, `recording` (save), `replay`, `diff`, `keep`, `restart`
@@ -43,6 +72,9 @@ every player of a world; reads go to the authority.
 - Faults: exit code + `ARA_PLAYER_CRASH` stderr line + 1 s silence →
   `player_panicked | player_crashed | player_unresponsive | player_exited`, logged with a
   `play.restart` fix; `play.status` holds the structured fault.
+- `play.stop` removes the active world and returns `status: "stopping"` immediately.
+  An owned worker sends STOP and reaps its children; `play.status.stopping` lists
+  outstanding shutdowns. Host ticks only join workers that have already finished.
 - `test.run {steps, seed, determinism}` runs a spec (`spec.rs`: input, step, until,
   expect, patch, watch, capture, hash) in fresh headless players; `determinism` runs
   it twice in separate processes and requires equal final hashes.
@@ -70,6 +102,13 @@ every player of a world; reads go to the authority.
   `play.read` and `play.inspect` take `player` (0 = authority, 1.. = clients).
 - Players inherit the daemon's environment: SDL3.dll (ara-platform) on PATH, and in
   debug builds the Vulkan validation layer (`VK_LAYER_PATH`) for captures/windows.
+- Embedded worlds: headless pool players get `play.embed` before `play.start`
+  (dedicated servers get no surface). The service pulls each ring's unnamed NT
+  handles out of the child (`DuplicateHandle`; the child never holds a handle to
+  the owner) and owns them until stop/restart/resize; `Surfaces` owns its own
+  duplicates. Frames and new generations are read on host ticks; without a
+  `Surfaces` handle frames go straight back. Taking `surfaces()` again makes every
+  player start a fresh generation, so slots a lost handle held come back.
 
 ## Testing
 

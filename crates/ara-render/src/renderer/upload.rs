@@ -26,6 +26,10 @@ pub(super) struct Content {
     pub texture_indices: Vec<u32>,
     /// Hash of the textures and environment (`update_geometry` must keep them).
     pub static_hash: String,
+    pub material_buffer: Buffer,
+    pub material_count: usize,
+    /// Logical material digest after a parameter-only edit, independent of heap slots.
+    pub material_update: Option<[u8; 32]>,
     pub material_index: u32,
     pub lights: Vec<Light>,
     pub light_buffer: Buffer,
@@ -67,6 +71,12 @@ impl Renderer {
         )?;
         let compute_frame_index = gpu.storage_buffer(compute_frame)?.index;
         let content = upload_content(&mut gpu, scene, artifacts, &shader_metadata, compute_frame)?;
+        let look = crate::look::gpu::LookGpu::new(
+            &mut gpu,
+            artifacts,
+            &shader_metadata.content_key,
+            size,
+        )?;
         Ok(Self {
             gpu,
             size,
@@ -82,6 +92,8 @@ impl Renderer {
             artifacts: artifacts.to_path_buf(),
             shader_metadata,
             last_timings: Vec::new(),
+            look,
+            native: None,
         })
     }
 
@@ -90,6 +102,7 @@ impl Renderer {
     /// structural changes (spawns, asset reloads); per-frame motion uses `update_mesh`.
     /// On error the previous content stays live (last-good).
     pub fn replace_scene(&mut self, scene: Scene) -> Result<()> {
+        ensure!(!scene.meshes.is_empty(), "Scene has no geometry");
         let content = upload_content(
             &mut self.gpu,
             scene,
@@ -98,6 +111,13 @@ impl Renderer {
             self.compute_frame,
         )?;
         let old = std::mem::replace(&mut self.content, content);
+        self.retire_content(old)?;
+        self.targets.history = None;
+        self.frame_number = 0;
+        Ok(())
+    }
+
+    pub(super) fn retire_content(&mut self, old: Content) -> Result<()> {
         for resource in old.static_owned.into_iter().chain(old.geometry_owned) {
             self.gpu.retire(resource)?;
         }
@@ -109,8 +129,6 @@ impl Renderer {
             self.gpu.retire_pipeline(pipeline)?;
         }
         self.gpu.collect()?;
-        self.targets.history = None;
-        self.frame_number = 0;
         Ok(())
     }
 
@@ -202,11 +220,22 @@ impl Renderer {
         }
         let mut hash = Sha256::new();
         hash.update(self.content.base_hash.as_bytes());
+        if let Some(native) = &self.native {
+            native.hash(&mut hash);
+        }
         for mesh in &self.content.meshes {
             if let Some(latest) = &mesh.latest {
                 hash.update(mesh.entity.to_le_bytes());
                 hash.update(bytemuck::cast_slice(latest));
             }
+        }
+        if let Some(materials) = self.content.material_update {
+            hash.update(materials);
+        }
+        for (entity, name) in &self.content.entity_names {
+            hash.update(entity.to_le_bytes());
+            hash.update((name.len() as u64).to_le_bytes());
+            hash.update(name.as_bytes());
         }
         hash.update(bytemuck::cast_slice(&self.content.lights));
         hash.update(bytemuck::bytes_of(&self.content.sun_direction));
@@ -232,6 +261,8 @@ pub(super) struct Geometry {
     pub meshes: Vec<Mesh>,
     pub inputs: Vec<(Resource, Access)>,
     pub owned: Vec<Resource>,
+    pub material_buffer: Buffer,
+    pub material_count: usize,
     pub material_index: u32,
     pub lights: Vec<Light>,
     pub light_buffer: Buffer,
@@ -250,10 +281,7 @@ pub(super) fn upload_geometry(
     lights: Vec<Light>,
     texture_indices: &[u32],
 ) -> Result<Geometry> {
-    ensure!(
-        !materials.is_empty() && !meshes.is_empty(),
-        "Scene has no geometry/materials"
-    );
+    ensure!(!materials.is_empty(), "Scene has no materials");
     ensure!(
         lights.len() <= MAX_LIGHTS,
         "Tiled baseline supports at most 64 local lights"
@@ -264,15 +292,6 @@ pub(super) fn upload_geometry(
             .iter()
             .all(|v| v.is_finite()),
         "Non-finite light"
-    );
-    ensure!(
-        materials.iter().all(|m| m
-            .base_color
-            .iter()
-            .chain(&m.emissive_roughness)
-            .chain(&m.surface)
-            .all(|v| v.is_finite())),
-        "Non-finite material"
     );
     let mut seen = std::collections::BTreeSet::new();
     for mesh in &meshes {
@@ -297,14 +316,7 @@ pub(super) fn upload_geometry(
             "Non-finite vertex"
         );
     }
-    let mut materials = materials;
-    for material in &mut materials {
-        for index in &mut material.textures {
-            *index = *texture_indices
-                .get(*index as usize)
-                .ok_or_else(|| anyhow::anyhow!("Material texture out of bounds"))?;
-        }
-    }
+    let materials = prepare_materials(materials, texture_indices)?;
     let mut created = Vec::new();
     let result = (|| -> Result<Geometry> {
         let material_buffer = upload_buffer(
@@ -373,6 +385,8 @@ pub(super) fn upload_geometry(
                 Resource::Buffer(light_buffer),
                 Resource::Buffer(compute_lights),
             ],
+            material_buffer,
+            material_count: materials.len(),
             material_index,
             lights,
             light_buffer,
@@ -391,12 +405,68 @@ pub(super) fn upload_geometry(
     result
 }
 
-fn upload_content(
+/// Validate logical material parameters and resolve their texture slots before upload.
+pub(super) fn prepare_materials(
+    mut materials: Vec<crate::scene::Material>,
+    texture_indices: &[u32],
+) -> Result<Vec<crate::scene::Material>> {
+    ensure!(
+        materials.iter().all(|m| m
+            .base_color
+            .iter()
+            .chain(&m.emissive_roughness)
+            .chain(&m.surface)
+            .all(|v| v.is_finite())),
+        "Non-finite material"
+    );
+    for material in &mut materials {
+        for index in &mut material.textures {
+            *index = *texture_indices
+                .get(*index as usize)
+                .ok_or_else(|| anyhow::anyhow!("Material texture out of bounds"))?;
+        }
+    }
+    Ok(materials)
+}
+
+pub(super) fn upload_content(
     gpu: &mut VulkanDevice,
     scene: Scene,
     artifacts: &Path,
     shader_metadata: &crate::capture::ShaderMetadata,
     compute_frame: Buffer,
+) -> Result<Content> {
+    let mut allocated = Vec::new();
+    let mut pipelines = Vec::new();
+    let result = upload_content_inner(
+        gpu,
+        scene,
+        artifacts,
+        shader_metadata,
+        compute_frame,
+        &mut allocated,
+        &mut pipelines,
+    );
+    if result.is_err() {
+        for pipeline in pipelines {
+            gpu.retire_pipeline(pipeline)?;
+        }
+        for resource in allocated.into_iter().rev() {
+            gpu.retire(resource)?;
+        }
+        gpu.collect()?;
+    }
+    result
+}
+
+fn upload_content_inner(
+    gpu: &mut VulkanDevice,
+    scene: Scene,
+    artifacts: &Path,
+    shader_metadata: &crate::capture::ShaderMetadata,
+    compute_frame: Buffer,
+    allocated: &mut Vec<Resource>,
+    pipelines: &mut Vec<Pipeline>,
 ) -> Result<Content> {
     ensure!(
         scene.sun_direction.is_finite()
@@ -435,37 +505,39 @@ fn upload_content(
             vk::Format::R8G8B8A8_UNORM
         };
         let image = upload_image(gpu, texture.size, format, &texture.rgba)?;
+        allocated.push(Resource::Image(image));
         static_owned.push(Resource::Image(image));
         texture_indices.push(gpu.sampled_image(image, false)?.index);
         static_inputs.push((Resource::Image(image), Access::ShaderRead));
     }
-    let geometry = match upload_geometry(
+    let geometry = upload_geometry(
         gpu,
         scene.materials,
         scene.meshes,
         scene.lights,
         &texture_indices,
-    ) {
-        Ok(geometry) => geometry,
-        Err(error) => {
-            for resource in static_owned {
-                gpu.retire(resource)?;
-            }
-            gpu.collect()?;
-            return Err(error);
-        }
-    };
+    )?;
+    allocated.extend(geometry.owned.iter().copied());
+    allocated.extend(geometry.meshes.iter().flat_map(|mesh| {
+        [
+            Resource::Buffer(mesh.vertices),
+            Resource::Buffer(mesh.indices),
+        ]
+    }));
     let environment_image = upload_image(
         gpu,
         scene.environment_size,
         vk::Format::R32G32B32A32_SFLOAT,
         bytemuck::cast_slice(&scene.environment),
     )?;
+    allocated.push(Resource::Image(environment_image));
     let environment = gpu.sampled_image(environment_image, false)?.index;
     static_inputs.push((Resource::Image(environment_image), Access::ShaderRead));
     let usage = vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::STORAGE;
     let diffuse = gpu.create_image(32, 16, vk::Format::R32G32B32A32_SFLOAT, usage)?;
+    allocated.push(Resource::Image(diffuse));
     let specular = gpu.create_image(256, 640, vk::Format::R32G32B32A32_SFLOAT, usage)?;
+    allocated.push(Resource::Image(specular));
     static_owned.extend([
         Resource::Image(environment_image),
         Resource::Image(diffuse),
@@ -554,7 +626,9 @@ fn upload_content(
         Ok(gpu.create_pipeline(&cooked, artifacts)?)
     };
     let irradiance_pipeline = load(gpu, "irradiance")?;
+    pipelines.push(irradiance_pipeline);
     let specular_pipeline = load(gpu, "prefilter")?;
+    pipelines.push(specular_pipeline);
     let compiled = graph.compile()?;
     let mut points = Vec::new();
     for (index, pass) in compiled.passes.iter().enumerate() {
@@ -595,6 +669,9 @@ fn upload_content(
         ibl_pipelines: [irradiance_pipeline, specular_pipeline],
         texture_indices,
         static_hash,
+        material_buffer: geometry.material_buffer,
+        material_count: geometry.material_count,
+        material_update: None,
         material_index: geometry.material_index,
         lights: geometry.lights,
         light_buffer: geometry.light_buffer,

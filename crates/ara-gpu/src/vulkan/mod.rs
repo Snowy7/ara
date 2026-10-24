@@ -4,17 +4,22 @@ mod cache;
 mod context;
 use ash::vk::TaggedStructure;
 mod encode;
+pub mod external;
 mod guard;
 mod heap;
+mod image_copy;
 mod lifetime;
 mod pipeline;
 mod recording;
+mod reload;
+pub use reload::ShaderStatus;
 mod surface;
 
 pub use crate::commands::{Attachment, Command, CommandList, Draw, PassTiming, Recorder};
 use crate::{arena::Arena, *};
 use context::{BufferAllocation, ImageAllocation};
 pub use context::{DeviceInfo, Diagnostic, Gpu as Context, image_barrier};
+pub use heap::DescriptorUsage;
 use heap::Heap;
 use std::{ffi::CString, path::PathBuf};
 
@@ -55,17 +60,38 @@ pub struct VulkanDevice {
     cache: vk::PipelineCache,
     cache_path: PathBuf,
     pending: Vec<recording::Pending>,
+    shader_worker: Option<reload::Worker>,
 }
 
 impl VulkanDevice {
+    /// Inspect reserved descriptor capacity at a content/test boundary. Collect
+    /// completed retirements first when checking a replacement for resource leaks.
+    pub fn descriptor_usage(&self) -> DescriptorUsage {
+        self.heap.usage(&self.context)
+    }
     /// Read-only native integration access; ownership remains with this device.
     pub fn context(&self) -> &Context {
         &self.context
     }
     /// Create a debug/sync-validated device. Empty extensions create a headless device.
     pub fn new(window_extensions: &[CString], cache_dir: impl Into<PathBuf>) -> Result<Self> {
-        let context = Context::new(window_extensions)?;
-        let cache_dir = cache_dir.into();
+        Self::from_context(Context::new(window_extensions)?, cache_dir.into())
+    }
+
+    /// Create a raster-only logical device, even on hardware that supports RT.
+    /// Ray-query/AS extensions, features and heap capacity are omitted; acceleration
+    /// structure allocation is rejected before creating any native RT resources.
+    pub fn new_raster(
+        window_extensions: &[CString],
+        cache_dir: impl Into<PathBuf>,
+    ) -> Result<Self> {
+        Self::from_context(
+            Context::with_ray_tracing(window_extensions, false)?,
+            cache_dir.into(),
+        )
+    }
+
+    fn from_context(context: Context, cache_dir: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&cache_dir).map_err(anyhow::Error::from)?;
         let uuid = context
             .info
@@ -114,6 +140,15 @@ impl VulkanDevice {
             guard.push(guard::Object::Semaphore(*semaphore));
         }
         let heap = Heap::new(&context)?;
+        let shader_worker = if std::env::var_os("ARA_SHADER_DIR").is_some() {
+            Some(reload::Worker::new(
+                context.device.clone(),
+                context.info.mesh_shading,
+                heap.layout,
+            )?)
+        } else {
+            None
+        };
         guard.disarm();
         Ok(Self {
             context,
@@ -128,6 +163,7 @@ impl VulkanDevice {
             cache,
             cache_path,
             pending: Vec::new(),
+            shader_worker,
         })
     }
 
@@ -156,13 +192,52 @@ impl VulkanDevice {
         format: vk::Format,
         usage: vk::ImageUsageFlags,
     ) -> Result<Image> {
+        self.create_mip_image([width, height], format, 1, usage)
+    }
+
+    /// Allocates a sampled texture with native mip levels, including compressed BC
+    /// formats. UploadImage and ReadImage transfer all levels, finest first.
+    pub fn create_mip_image(
+        &mut self,
+        size: [u32; 2],
+        format: vk::Format,
+        mip_levels: u32,
+        usage: vk::ImageUsageFlags,
+    ) -> Result<Image> {
+        let [width, height] = size;
+        if matches!(
+            format,
+            vk::Format::BC4_UNORM_BLOCK
+                | vk::Format::BC5_UNORM_BLOCK
+                | vk::Format::BC6H_UFLOAT_BLOCK
+                | vk::Format::BC7_UNORM_BLOCK
+                | vk::Format::BC7_SRGB_BLOCK
+        ) && !self.context.info.texture_compression_bc
+        {
+            return Err(GpuError::Contract(
+                "BC texture compression is unavailable on this device".into(),
+            ));
+        }
         if width == 0
             || height == 0
             || width > self.context.info.max_image_dimension
             || height > self.context.info.max_image_dimension
+            || mip_levels == 0
+            || mip_levels > width.max(height).ilog2() + 1
         {
             return Err(GpuError::Contract(
-                "Image extent exceeds device limits".into(),
+                "Image extent or mip count exceeds device limits".into(),
+            ));
+        }
+        if mip_levels > 1
+            && usage.intersects(
+                vk::ImageUsageFlags::STORAGE
+                    | vk::ImageUsageFlags::COLOR_ATTACHMENT
+                    | vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+            )
+        {
+            return Err(GpuError::Contract(
+                "Mip chains are sampled textures, not storage or attachment images".into(),
             ));
         }
         let aspect = if format == vk::Format::D32_SFLOAT {
@@ -171,7 +246,7 @@ impl VulkanDevice {
             vk::ImageAspectFlags::COLOR
         };
         // SAFETY: Capability query is read-only and validates this format/usage combination.
-        let _ = unsafe {
+        let caps = unsafe {
             self.context
                 .instance
                 .get_physical_device_image_format_properties(
@@ -184,7 +259,17 @@ impl VulkanDevice {
                 )
         }
         .map_err(anyhow::Error::from)?;
-        let raw = self.context.image(width, height, format, usage, aspect)?;
+        if mip_levels > caps.max_mip_levels
+            || width > caps.max_extent.width
+            || height > caps.max_extent.height
+        {
+            return Err(GpuError::Contract(
+                "Image shape exceeds format-specific limits".into(),
+            ));
+        }
+        let raw = self
+            .context
+            .image(width, height, format, mip_levels, usage, aspect)?;
         self.images.insert(Owned {
             raw,
             last: [0; 2],
@@ -263,6 +348,7 @@ impl VulkanDevice {
         cooked: &cooked::CookedPipeline,
         artifacts: &std::path::Path,
     ) -> Result<Pipeline> {
+        crate::cpu_scope!("GPU.pipeline_create");
         let native = pipeline::create(
             &self.context,
             self.heap.layout,
@@ -270,10 +356,17 @@ impl VulkanDevice {
             cooked,
             artifacts,
         )?;
-        self.pipelines.insert(native)
+        let handle = self.pipelines.insert(native)?;
+        if let Some(worker) = &mut self.shader_worker {
+            worker.track(handle, cooked, artifacts)?;
+        }
+        Ok(handle)
     }
     /// Invalidate a cooked pipeline identity and defer native destruction until all queues complete.
     pub fn retire_pipeline(&mut self, pipeline: Pipeline) -> Result<()> {
+        if let Some(worker) = &self.shader_worker {
+            worker.forget(pipeline);
+        }
         self.retired.push(Retired::Pipeline(
             self.pipelines.remove(pipeline)?,
             self.submitted,

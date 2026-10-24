@@ -1,6 +1,7 @@
 //! Navigation state is an op document with a history independent of scene undo.
 use ara_doc::{AssetId, Document, Edit, RecordId, Workspace};
 use ara_ops::{Author, Store, TxnMeta};
+use ara_render_fidelity::presets::{QualityChoice, QualityPreset};
 use ara_schema::{FieldPath, Schema, SchemaDb};
 use ara_ui::docking::{Axis, DockDrop, DockLayout, DockNode, Floating};
 use glam::{Quat, Vec3};
@@ -24,8 +25,9 @@ pub enum Tool {
     Scale,
 }
 /// Perspective scene camera; this is editor state, never gameplay state.
+/// Fields missing from older saved state take their defaults.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct Camera {
     /// Orbit centre in metres.
     pub target: Vec3,
@@ -35,6 +37,9 @@ pub struct Camera {
     pub pitch: f32,
     /// Orbit radius in metres.
     pub distance: f32,
+    /// Vertical field of view in degrees, within [`Camera::FOV_RANGE`]; set it with
+    /// [`Camera::set_fov`]. Matches a scene `Camera.fov` for parity shots.
+    pub fov_y_degrees: f32,
 }
 impl Default for Camera {
     fn default() -> Self {
@@ -43,10 +48,37 @@ impl Default for Camera {
             yaw: 0.6,
             pitch: 0.4,
             distance: 10.,
+            fov_y_degrees: Self::DEFAULT_FOV,
         }
     }
 }
 impl Camera {
+    /// The Scene view's vertical field of view until one is chosen, in degrees.
+    pub const DEFAULT_FOV: f32 = 50.;
+    /// Vertical fields of view the Scene view accepts, in degrees.
+    pub const FOV_RANGE: std::ops::RangeInclusive<f32> = 10.0..=120.0;
+    /// Set the vertical field of view, clamped to [`Camera::FOV_RANGE`].
+    pub fn set_fov(&mut self, degrees: f32) {
+        self.fov_y_degrees = degrees.clamp(*Self::FOV_RANGE.start(), *Self::FOV_RANGE.end());
+    }
+    /// The field of view for labels: whole degrees or one decimal (`46°`, `47.5°`).
+    pub fn fov_label(&self) -> String {
+        let tenths = (self.fov_y_degrees * 10.).round() / 10.;
+        if tenths.fract() == 0. {
+            format!("{tenths:.0}°")
+        } else {
+            format!("{tenths:.1}°")
+        }
+    }
+    /// Look from `position` along `forward` (a scene camera's pose), keeping the
+    /// orbit distance so the pivot lies straight ahead. The orbit camera has no
+    /// roll, and views within ~2° of vertical keep the pitch limit.
+    pub fn look_from(&mut self, position: Vec3, forward: Vec3) {
+        let back = -forward.try_normalize().unwrap_or(Vec3::NEG_Z);
+        self.pitch = back.y.clamp(-1., 1.).asin().clamp(-1.54, 1.54);
+        self.yaw = back.x.atan2(back.z);
+        self.target = position - (self.position() - self.target);
+    }
     /// Camera position, derived from its orbit representation.
     pub fn position(&self) -> Vec3 {
         self.target
@@ -61,7 +93,7 @@ impl Camera {
         ara_render::scene::CameraSpec::LookAt {
             position: self.position(),
             target: self.target,
-            vertical_fov: 50f32.to_radians(),
+            vertical_fov: self.fov_y_degrees.to_radians(),
         }
     }
     /// Pan in the camera's image plane, in logical pixels.
@@ -117,7 +149,19 @@ pub struct EditorState {
     pub light: bool,
     /// Disable decorative transitions while preserving all interaction feedback.
     pub reduce_motion: bool,
-    /// Use the same-device fidelity view for Scene lighting.
+    /// Scene viewport quality override, the user preference `viewport.quality`:
+    /// `None` uses the project's `rendering.quality`, `Some(Auto)` detects from the
+    /// GPU, `Some(Preset(..))` forces Low/Medium/High/Epic. Serialized as text
+    /// (absent, `auto`, `low` … `epic`).
+    #[serde(with = "render_quality_text")]
+    pub render_quality: Option<QualityChoice>,
+    /// This GPU's automatic preset (`QualityPreset::detect`), filled when the
+    /// window's device starts; runtime only, never persisted.
+    #[serde(skip)]
+    pub detected_quality: Option<QualityPreset>,
+    /// Use the same-device fidelity view for Scene lighting: false only when the
+    /// effective quality resolves to Low. Derived from `render_quality` (and the
+    /// project's default) in `apply_settings`; never set it directly.
     pub quality: bool,
     /// View pose.
     pub camera: Camera,
@@ -149,6 +193,10 @@ pub struct EditorState {
     pub presence: BTreeMap<String, AgentPresence>,
     /// Session whose view the human explicitly chose to follow.
     pub follow: Option<String>,
+    /// Each scene's last camera, restored when the scene is reopened.
+    pub scene_cameras: BTreeMap<String, Camera>,
+    /// Scenes the human opened, newest first (File > Open Recent).
+    pub recent_scenes: Vec<String>,
     /// Selected source media path; separate from entity selection.
     pub asset_path: Option<String>,
     /// Folder shown by the asset browser, relative to the project root.
@@ -214,6 +262,8 @@ impl Default for EditorState {
             layout: default_layout(),
             light: false,
             reduce_motion: false,
+            render_quality: None,
+            detected_quality: None,
             quality: true,
             camera: Camera::default(),
             tool: Tool::Translate,
@@ -230,6 +280,8 @@ impl Default for EditorState {
             palette: false,
             presence: BTreeMap::new(),
             follow: None,
+            scene_cameras: BTreeMap::new(),
+            recent_scenes: Vec::new(),
             asset_path: None,
             asset_folder: String::new(),
             asset_grid: true,
@@ -261,6 +313,17 @@ impl Default for EditorState {
     }
 }
 impl EditorState {
+    /// Whether `other` renders a different Scene image: the document, camera, view
+    /// mode, viewport-hidden entities or quality. Selection, gizmos and the grid are
+    /// UI overlays and need no Scene frame.
+    pub(crate) fn scene_changed(&self, other: &Self) -> bool {
+        self.doc != other.doc
+            || self.camera != other.camera
+            || self.view_mode != other.view_mode
+            || self.hidden != other.hidden
+            || self.quality != other.quality
+            || self.render_quality != other.render_quality
+    }
     pub(crate) fn panels_changed(&self, other: &Self) -> bool {
         self.doc != other.doc
             || self.asset_path != other.asset_path
@@ -279,6 +342,8 @@ impl EditorState {
             || self.light != other.light
             || self.reduce_motion != other.reduce_motion
             || self.quality != other.quality
+            || self.render_quality != other.render_quality
+            || self.detected_quality != other.detected_quality
             || self.tool != other.tool
             || self.local != other.local
             || self.centre != other.centre
@@ -317,8 +382,13 @@ impl EditorState {
             self.light = theme == "light";
         }
         if let Some(quality) = text("viewport.quality") {
-            self.quality = quality == "fidelity";
+            self.render_quality = match quality.as_str() {
+                "project" => None,
+                other => other.parse().ok(),
+            };
         }
+        // The one place `quality` is derived: only Low is the raster view.
+        self.quality = self.resolve_quality(self.render_choice()) != Some(QualityPreset::Low);
 
         if let Some(v) = self
             .settings
@@ -326,6 +396,34 @@ impl EditorState {
             .and_then(Value::as_bool)
         {
             self.reduce_motion = v;
+        }
+    }
+    /// The project's default quality (`ara.project.json` `rendering.quality`).
+    pub fn project_quality(&self) -> QualityChoice {
+        self.settings
+            .get("rendering.quality")
+            .and_then(Value::as_str)
+            .and_then(|q| q.parse().ok())
+            .unwrap_or_default()
+    }
+    /// What the Scene view renders with: the override, else the project's default.
+    pub fn render_choice(&self) -> QualityChoice {
+        self.render_quality
+            .unwrap_or_else(|| self.project_quality())
+    }
+    /// The preset `choice` runs at on this GPU (`None` while Auto is undetected).
+    pub fn resolve_quality(&self, choice: QualityChoice) -> Option<QualityPreset> {
+        match choice {
+            QualityChoice::Preset(preset) => Some(preset),
+            QualityChoice::Auto => self.detected_quality,
+        }
+    }
+    /// A quality as people read it: `High`, `Auto · High` (detected) or `Auto`.
+    pub fn quality_label(&self, choice: QualityChoice) -> String {
+        match (choice, self.resolve_quality(choice)) {
+            (QualityChoice::Preset(preset), _) => preset_title(preset).into(),
+            (QualityChoice::Auto, Some(preset)) => format!("Auto · {}", preset_title(preset)),
+            (QualityChoice::Auto, None) => "Auto".into(),
         }
     }
     /// A setting's number, or `default`.
@@ -365,7 +463,7 @@ fn home(panel: &str) -> &'static str {
     match panel {
         "hierarchy" => "left",
         "inspector" => "right",
-        "assets" | "console" | "agents" => "bottom",
+        "assets" | "console" | "problems" | "agents" => "bottom",
         _ => "view",
     }
 }
@@ -459,7 +557,7 @@ fn add_tab(dock: &mut DockLayout, area: &str, panel: &str) -> ara_ui::Result<()>
     if !visit(&mut root, area, panel)
         && !floating.iter_mut().any(|f| visit(&mut f.root, area, panel))
     {
-        return Err("ARA7042: dock destination missing".into());
+        return Err("ARA4042: dock destination missing".into());
     }
     *dock = DockLayout::with_floating(root, floating)?;
     Ok(())
@@ -496,7 +594,7 @@ pub fn preset_layout(name: &str) -> Option<DockNode> {
                 V,
                 0.5,
                 area("left", &["hierarchy"]),
-                area("bottom", &["assets", "console", "agents"]),
+                area("bottom", &["assets", "console", "problems", "agents"]),
             ),
             split(
                 H,
@@ -512,7 +610,7 @@ pub fn preset_layout(name: &str) -> Option<DockNode> {
                 V,
                 0.8,
                 area("view", DOCUMENTS),
-                area("bottom", &["assets", "console", "agents"]),
+                area("bottom", &["assets", "console", "problems", "agents"]),
             ),
             split(
                 V,
@@ -527,7 +625,7 @@ pub fn preset_layout(name: &str) -> Option<DockNode> {
             split(
                 V,
                 0.62,
-                area("bottom", &["assets", "console"]),
+                area("bottom", &["assets", "console", "problems"]),
                 area("left", &["hierarchy", "agents"]),
             ),
             split(
@@ -547,7 +645,7 @@ pub fn preset_layout(name: &str) -> Option<DockNode> {
                 V,
                 0.5,
                 area("left", &["hierarchy"]),
-                area("bottom", &["assets", "console", "agents"]),
+                area("bottom", &["assets", "console", "problems", "agents"]),
             ),
             split(
                 H,
@@ -568,7 +666,10 @@ pub fn preset_layout(name: &str) -> Option<DockNode> {
                 area("view", &["scene", "game", "material", "vfx", "animation"]),
                 area("right", &["inspector", "hierarchy"]),
             ),
-            area("bottom", &["profiler", "console", "assets", "agents"]),
+            area(
+                "bottom",
+                &["profiler", "console", "problems", "assets", "agents"],
+            ),
         ),
         "laptop" => split(
             H,
@@ -578,7 +679,7 @@ pub fn preset_layout(name: &str) -> Option<DockNode> {
                 H,
                 0.74,
                 area("view", DOCUMENTS),
-                area("right", &["inspector", "console", "agents"]),
+                area("right", &["inspector", "console", "problems", "agents"]),
             ),
         ),
         _ => return None,
@@ -608,7 +709,9 @@ impl Navigation {
             let mut layout =
                 DockLayout::new(default_layout()).map_err(|e| anyhow::anyhow!(e.to_string()))?;
             // A layout from an older editor that fails validation falls back to the default.
-            if layout.restore(&std::fs::read_to_string(path)?).is_ok() {
+            let text = std::fs::read_to_string(&path)
+                .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+            if layout.restore(&text).is_ok() {
                 state.set_dock(&layout);
             }
         }
@@ -701,4 +804,79 @@ pub(crate) fn saved_layouts(root: &Path) -> Vec<String> {
         .collect();
     names.sort();
     names
+}
+
+/// A preset's title: `Low`, `Medium`, `High`, `Epic`.
+pub fn preset_title(preset: QualityPreset) -> &'static str {
+    match preset {
+        QualityPreset::Low => "Low",
+        QualityPreset::Medium => "Medium",
+        QualityPreset::High => "High",
+        QualityPreset::Epic => "Epic",
+    }
+}
+
+/// `EditorState::render_quality` as text: absent (the project's default), `auto`,
+/// `low`, `medium`, `high` or `epic`.
+mod render_quality_text {
+    use ara_render_fidelity::presets::QualityChoice;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        value: &Option<QualityChoice>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(choice) => serializer.serialize_some(&choice.to_string()),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<QualityChoice>, D::Error> {
+        Option::<String>::deserialize(deserializer)?
+            .map(|text| text.parse().map_err(serde::de::Error::custom))
+            .transpose()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quality_is_derived_from_the_override_the_project_and_the_gpu() {
+        let mut state = EditorState::default();
+        state
+            .settings
+            .insert("viewport.quality".into(), json!("project"));
+        state
+            .settings
+            .insert("rendering.quality".into(), json!("auto"));
+        state.apply_settings();
+        assert_eq!(state.render_quality, None);
+        assert!(state.quality, "an undetected Auto is not Low");
+        assert_eq!(state.quality_label(state.render_choice()), "Auto");
+        // Auto on a GPU without ray tracing resolves to Low: the raster view.
+        state.detected_quality = Some(QualityPreset::Low);
+        state.apply_settings();
+        assert!(!state.quality);
+        assert_eq!(state.quality_label(state.render_choice()), "Auto · Low");
+        state
+            .settings
+            .insert("viewport.quality".into(), json!("high"));
+        state.apply_settings();
+        assert_eq!(
+            state.render_quality,
+            Some(QualityChoice::Preset(QualityPreset::High))
+        );
+        assert!(state.quality);
+        // Serialized as text; detection is runtime only.
+        let value = serde_json::to_value(&state).expect("state serializes");
+        assert_eq!(value["renderQuality"], "high");
+        let back: EditorState = serde_json::from_value(value).expect("state deserializes");
+        assert_eq!(back.render_quality, state.render_quality);
+        assert_eq!(back.detected_quality, None);
+    }
 }

@@ -27,6 +27,73 @@ pub struct View {
     pub scene_depth: Option<SceneDepth>,
     /// Optional HDR scene color to composite into; requires scene_depth.
     pub scene_color: Option<SceneColor>,
+    /// Where the effect sits in the world. `camera`, scene depth and probes are
+    /// world-space; the system simulates and draws in its own local space.
+    pub placement: Placement,
+    /// Multiplier on emitted and lit particle radiance (not on opacity).
+    pub intensity: f32,
+}
+
+/// An effect instance's world origin and uniform scale (`VisualEffect.scale`):
+/// local positions, velocities and sizes appear `scale` times larger in the world.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Placement {
+    /// World position of the effect's local origin, in metres.
+    pub origin: Vec3,
+    /// World metres per local unit; positive.
+    pub scale: f32,
+}
+impl Default for Placement {
+    fn default() -> Self {
+        Self {
+            origin: Vec3::ZERO,
+            scale: 1.,
+        }
+    }
+}
+impl Placement {
+    /// The world camera expressed in the effect's local space.
+    pub fn local_camera(&self, camera: &CameraSpec) -> Result<CameraSpec> {
+        ensure!(
+            self.origin.is_finite() && self.scale.is_finite() && self.scale > 0.,
+            "invalid VFX placement"
+        );
+        let local = |p: Vec3| (p - self.origin) / self.scale;
+        Ok(match camera {
+            CameraSpec::LookAt {
+                position,
+                target,
+                vertical_fov,
+            } => CameraSpec::LookAt {
+                position: local(*position),
+                target: local(*target),
+                vertical_fov: *vertical_fov,
+            },
+            CameraSpec::FrameBounds {
+                min,
+                max,
+                direction,
+                padding,
+                vertical_fov,
+            } => CameraSpec::FrameBounds {
+                min: local(*min),
+                max: local(*max),
+                direction: *direction,
+                padding: *padding,
+                vertical_fov: *vertical_fov,
+            },
+            CameraSpec::Orthographic { centre, world_size } => {
+                ensure!(
+                    self.scale == 1. && self.origin == Vec3::ZERO,
+                    "orthographic VFX views cannot be placed"
+                );
+                CameraSpec::Orthographic {
+                    centre: *centre,
+                    world_size: *world_size,
+                }
+            }
+        })
+    }
 }
 /// Extracted lighting inputs for lit particles.
 pub struct Lighting {
@@ -99,6 +166,8 @@ impl Default for View {
             async_compute: false,
             scene_depth: None,
             scene_color: None,
+            placement: Placement::default(),
+            intensity: 1.,
         }
     }
 }
@@ -151,9 +220,21 @@ pub struct GpuSystem {
     pub(crate) last_frame: Frame,
 }
 impl GpuSystem {
+    /// Completed GPU pass timestamps from the most recent step or render. Reading
+    /// these host-side measurements performs no particle-buffer readback.
+    pub fn timings(&self) -> &[ara_gpu::commands::PassTiming] {
+        &self.timings
+    }
+
     /// Advance one fixed tick and render it through declared graph passes.
     pub fn step(&mut self, gpu: &mut VulkanDevice, view: &View) -> Result<()> {
-        self.run_frame(gpu, view, false, true)
+        self.run_frame(gpu, view, false, true, true)
+    }
+    /// Advance one fixed tick without drawing it (no backdrop copy, draw or
+    /// tonemap). Live composition advances by the elapsed ticks, then calls
+    /// [`GpuSystem::render`] once per presented frame.
+    pub fn advance(&mut self, gpu: &mut VulkanDevice, view: &View) -> Result<()> {
+        self.run_frame(gpu, view, false, true, false)
     }
     /// Replay from tick zero and assemble a standard ara-render capture at time T.
     /// Capture tick is completed fixed ticks; settle frames are bounded and do not advance time.
@@ -186,18 +267,18 @@ impl GpuSystem {
         );
         self.reset(gpu)?;
         let view = View {
-            camera: request.camera.clone(),
+            camera: request.camera,
             exposure: request.exposure,
             async_compute: false,
             ..scene
         };
         for _ in 1..request.tick {
-            self.run_frame(gpu, &view, false, true)?;
+            self.run_frame(gpu, &view, false, true, true)?;
         }
         let settle = request.settle_frames.max(1);
-        self.run_frame(gpu, &view, settle == 1, true)?;
+        self.run_frame(gpu, &view, settle == 1, true, true)?;
         for frame in 1..settle {
-            self.run_frame(gpu, &view, frame + 1 == settle, false)?;
+            self.run_frame(gpu, &view, frame + 1 == settle, false, true)?;
         }
         let rgba = gpu.read(self.read_color)?;
         let ids = gpu
@@ -252,7 +333,7 @@ impl GpuSystem {
     /// Redraw a completed tick with new view inputs, without advancing simulation.
     pub fn render(&mut self, gpu: &mut VulkanDevice, view: &View) -> Result<()> {
         ensure!(self.tick > 0, "step before rendering a completed tick");
-        self.run_frame(gpu, view, false, false)
+        self.run_frame(gpu, view, false, false, true)
     }
     /// Bind material-system instance rows and all texture images reachable by them.
     /// Call at a completed frame boundary; textures return in Graphics/ShaderRead.
@@ -298,5 +379,42 @@ impl GpuSystem {
         }
         gpu.collect()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn placement_maps_the_world_camera_into_effect_space() {
+        let world = CameraSpec::LookAt {
+            position: Vec3::new(14., 3., 10.),
+            target: Vec3::new(10., 1., 10.),
+            vertical_fov: 0.8,
+        };
+        let placement = Placement {
+            origin: Vec3::new(10., 1., 10.),
+            scale: 2.,
+        };
+        let CameraSpec::LookAt {
+            position, target, ..
+        } = placement.local_camera(&world).unwrap()
+        else {
+            panic!("look-at stays look-at");
+        };
+        assert_eq!((position, target), (Vec3::new(2., 1., 0.), Vec3::ZERO));
+        assert!(
+            Placement {
+                scale: 0.,
+                ..placement
+            }
+            .local_camera(&world)
+            .is_err()
+        );
+        assert_eq!(
+            format!("{:?}", Placement::default().local_camera(&world).unwrap()),
+            format!("{world:?}")
+        );
     }
 }

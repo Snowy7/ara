@@ -222,7 +222,7 @@ dependencies = [
  "derive_more",
  "futures",
  "js-sys",
- "spki",
+ "spki 0.8.1",
  "tracing",
  "wasm-bindgen",
  "wtransport",
@@ -393,13 +393,15 @@ dependencies = [
 
 [[package]]
 name = "ara"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-ai",
  "ara-audio-why",
+ "ara-crash",
  "ara-diag",
  "ara-doc",
  "ara-host",
+ "ara-hub",
  "ara-hub-service",
  "ara-json",
  "ara-mcp",
@@ -409,6 +411,7 @@ dependencies = [
  "ara-proto",
  "ara-rpc",
  "ara-schema",
+ "ara-shader-cook",
  "ara-world",
  "clap",
  "insta",
@@ -417,7 +420,7 @@ dependencies = [
 
 [[package]]
 name = "ara-2d"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "anyhow",
  "ara-cmd",
@@ -435,7 +438,7 @@ dependencies = [
 
 [[package]]
 name = "ara-acoustics"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-audio",
  "ara-diag",
@@ -452,7 +455,7 @@ dependencies = [
 
 [[package]]
 name = "ara-ai"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-cmd",
  "ara-diag",
@@ -474,8 +477,9 @@ dependencies = [
 
 [[package]]
 name = "ara-anim"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
+ "ara-cmd",
  "ara-diag",
  "ara-doc",
  "ara-json",
@@ -493,7 +497,7 @@ dependencies = [
 
 [[package]]
 name = "ara-anim-capture"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-anim",
  "ara-anim-physics",
@@ -506,7 +510,7 @@ dependencies = [
 
 [[package]]
 name = "ara-anim-physics"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-anim",
  "ara-physics",
@@ -517,7 +521,7 @@ dependencies = [
 
 [[package]]
 name = "ara-asset"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-asset-format",
  "ara-diag",
@@ -541,7 +545,7 @@ dependencies = [
 
 [[package]]
 name = "ara-asset-format"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "bytemuck",
  "ktx2",
@@ -549,7 +553,7 @@ dependencies = [
 
 [[package]]
 name = "ara-audio"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-diag",
  "ara-json",
@@ -574,7 +578,7 @@ dependencies = [
 
 [[package]]
 name = "ara-audio-graph"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-audio",
  "ara-cmd",
@@ -592,7 +596,7 @@ dependencies = [
 
 [[package]]
 name = "ara-audio-mix"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-audio",
  "ara-diag",
@@ -605,7 +609,7 @@ dependencies = [
 
 [[package]]
 name = "ara-audio-why"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-audio",
  "ara-diag",
@@ -615,7 +619,7 @@ dependencies = [
 
 [[package]]
 name = "ara-bench"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-components",
  "ara-doc",
@@ -635,7 +639,7 @@ dependencies = [
 
 [[package]]
 name = "ara-brand"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "anyhow",
  "clap",
@@ -645,7 +649,7 @@ dependencies = [
 
 [[package]]
 name = "ara-bridge"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -656,7 +660,7 @@ dependencies = [
 
 [[package]]
 name = "ara-cmd"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-components",
  "ara-diag",
@@ -664,6 +668,7 @@ dependencies = [
  "ara-json",
  "ara-ops",
  "ara-schema",
+ "glam 0.34.1",
  "insta",
  "serde",
  "serde_json",
@@ -671,7 +676,7 @@ dependencies = [
 
 [[package]]
 name = "ara-collab"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-components",
  "ara-diag",
@@ -690,7 +695,7 @@ dependencies = [
 
 [[package]]
 name = "ara-color"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-schema",
  "serde",
@@ -698,7 +703,7 @@ dependencies = [
 
 [[package]]
 name = "ara-components"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-schema",
  "bevy_ecs",
@@ -708,7 +713,7 @@ dependencies = [
 
 [[package]]
 name = "ara-crash"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "anyhow",
  "ara-diag",
@@ -733,14 +738,30 @@ dependencies = [
 
 [[package]]
 name = "ara-crowd"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "rayon",
 ]
 
 [[package]]
+name = "ara-dev"
+version = "0.0.1-alpha"
+dependencies = [
+ "anyhow",
+ "clap",
+ "libc",
+ "quote",
+ "semver",
+ "serde",
+ "serde_json",
+ "syn 2.0.119",
+ "toml_edit",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "ara-diag"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "serde",
  "serde_json",
@@ -748,7 +769,7 @@ dependencies = [
 
 [[package]]
 name = "ara-doc"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-components",
  "ara-diag",
@@ -762,7 +783,7 @@ dependencies = [
 
 [[package]]
 name = "ara-editor"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "accesskit 0.25.1",
  "accesskit_windows 0.35.1",
@@ -774,9 +795,11 @@ dependencies = [
  "ara-audio-why",
  "ara-cmd",
  "ara-components",
+ "ara-crash",
  "ara-diag",
  "ara-doc",
  "ara-editor-gpu",
+ "ara-export",
  "ara-gpu",
  "ara-graph",
  "ara-host",
@@ -785,6 +808,7 @@ dependencies = [
  "ara-material",
  "ara-mcp",
  "ara-ops",
+ "ara-physics",
  "ara-platform",
  "ara-play-host",
  "ara-profile",
@@ -802,9 +826,12 @@ dependencies = [
  "ara-vfx",
  "ara-vfx-gpu",
  "ara-world",
+ "blake3",
  "bytemuck",
+ "dunce",
  "embed-resource",
  "glam 0.30.9",
+ "glam 0.34.1",
  "gltf",
  "image",
  "parley 0.12.0",
@@ -817,7 +844,7 @@ dependencies = [
 
 [[package]]
 name = "ara-editor-gpu"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "anyhow",
  "ara-gpu",
@@ -830,18 +857,26 @@ dependencies = [
 
 [[package]]
 name = "ara-export"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "anyhow",
+ "ara-asset",
  "ara-bridge",
+ "ara-components",
  "ara-crash",
  "ara-diag",
  "ara-export-installer",
  "ara-json",
  "ara-pack",
+ "ara-play",
+ "ara-play-host",
+ "ara-runtime",
+ "ara-runtime-script",
  "ara-schema",
+ "ara-script",
  "backhand",
  "blake3",
+ "ciborium",
  "clap",
  "dunce",
  "flate2",
@@ -856,7 +891,7 @@ dependencies = [
 
 [[package]]
 name = "ara-export-installer"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "anyhow",
  "blake3",
@@ -866,7 +901,7 @@ dependencies = [
 
 [[package]]
 name = "ara-export-player"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-bridge",
  "ara-crash",
@@ -881,7 +916,7 @@ dependencies = [
 
 [[package]]
 name = "ara-foliage"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-cmd",
  "ara-diag",
@@ -897,7 +932,7 @@ dependencies = [
 
 [[package]]
 name = "ara-geo"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "anyhow",
  "ara-asset",
@@ -912,7 +947,7 @@ dependencies = [
 
 [[package]]
 name = "ara-gpu"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "anyhow",
  "ara-diag",
@@ -923,11 +958,13 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.21",
+ "tracy-client",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "ara-graph"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-cmd",
  "ara-diag",
@@ -942,7 +979,7 @@ dependencies = [
 
 [[package]]
 name = "ara-host"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-cmd",
  "ara-collab",
@@ -955,21 +992,52 @@ dependencies = [
  "ara-profile",
  "ara-proto",
  "ara-schema",
+ "ara-ui-document",
  "ara-why",
  "insta",
+ "notify",
  "serde",
  "serde_json",
 ]
 
 [[package]]
+name = "ara-hub"
+version = "0.0.1-alpha"
+dependencies = [
+ "anyhow",
+ "ara-crash",
+ "ara-diag",
+ "ara-editor-gpu",
+ "ara-gpu",
+ "ara-hub-service",
+ "ara-json",
+ "ara-platform",
+ "ara-proto",
+ "ara-rpc",
+ "ara-ui",
+ "ara-ui-render",
+ "ara-ui-text",
+ "ara-update",
+ "embed-resource",
+ "image",
+ "resvg",
+ "sdl3-sys",
+ "serde",
+ "serde_json",
+ "windows",
+]
+
+[[package]]
 name = "ara-hub-service"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-diag",
  "ara-host",
  "ara-json",
  "ara-proto",
  "ara-rpc",
+ "ara-update",
+ "libc",
  "serde",
  "serde_json",
  "windows-sys 0.61.2",
@@ -977,7 +1045,7 @@ dependencies = [
 
 [[package]]
 name = "ara-import-worker"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-acoustics",
  "ara-asset",
@@ -997,7 +1065,7 @@ dependencies = [
 
 [[package]]
 name = "ara-import2d"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-2d",
  "ara-asset",
@@ -1009,12 +1077,17 @@ dependencies = [
 
 [[package]]
 name = "ara-importers"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-asset",
  "ara-asset-format",
+ "ara-audio",
+ "ara-cmd",
+ "ara-diag",
+ "ara-doc",
  "ara-geo",
  "ara-json",
+ "ara-ops",
  "ara-schema",
  "base64 0.22.1",
  "bcdec_rs",
@@ -1037,21 +1110,21 @@ dependencies = [
 
 [[package]]
 name = "ara-input"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "ara-jolt-sys"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "cc",
 ]
 
 [[package]]
 name = "ara-json"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "proptest",
  "ryu",
@@ -1061,7 +1134,7 @@ dependencies = [
 
 [[package]]
 name = "ara-l10n"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-cmd",
  "ara-diag",
@@ -1088,7 +1161,7 @@ dependencies = [
 
 [[package]]
 name = "ara-landscape"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "anyhow",
  "ara-asset-format",
@@ -1113,7 +1186,7 @@ dependencies = [
 
 [[package]]
 name = "ara-material"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-cmd",
  "ara-diag",
@@ -1129,7 +1202,7 @@ dependencies = [
 
 [[package]]
 name = "ara-mcp"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-diag",
  "ara-host",
@@ -1140,7 +1213,7 @@ dependencies = [
 
 [[package]]
 name = "ara-merge"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-components",
  "ara-diag",
@@ -1154,12 +1227,14 @@ dependencies = [
 
 [[package]]
 name = "ara-music"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-audio",
+ "ara-cmd",
  "ara-diag",
  "ara-doc",
  "ara-json",
+ "ara-ops",
  "ara-schema",
  "serde",
  "serde_json",
@@ -1167,7 +1242,7 @@ dependencies = [
 
 [[package]]
 name = "ara-nav"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-crowd",
  "ara-diag",
@@ -1185,14 +1260,14 @@ dependencies = [
 
 [[package]]
 name = "ara-nav-sys"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "cc",
 ]
 
 [[package]]
 name = "ara-net"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-diag",
  "ara-doc",
@@ -1218,7 +1293,7 @@ dependencies = [
 
 [[package]]
 name = "ara-ops"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-components",
  "ara-diag",
@@ -1232,14 +1307,14 @@ dependencies = [
 
 [[package]]
 name = "ara-opus-sys"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "cc",
 ]
 
 [[package]]
 name = "ara-pack"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-diag",
  "ara-json",
@@ -1256,7 +1331,7 @@ dependencies = [
 
 [[package]]
 name = "ara-pathtrace"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "anyhow",
  "ara-gpu",
@@ -1272,7 +1347,7 @@ dependencies = [
 
 [[package]]
 name = "ara-perception"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-physics",
  "ara-schema",
@@ -1284,7 +1359,7 @@ dependencies = [
 
 [[package]]
 name = "ara-physics"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-diag",
  "ara-profile",
@@ -1296,7 +1371,7 @@ dependencies = [
 
 [[package]]
 name = "ara-physics-jolt"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-jolt-sys",
  "ara-json",
@@ -1310,7 +1385,7 @@ dependencies = [
 
 [[package]]
 name = "ara-physics2d"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "anyhow",
  "ara-2d",
@@ -1330,7 +1405,7 @@ dependencies = [
 
 [[package]]
 name = "ara-platform"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "anyhow",
  "ara-audio",
@@ -1343,8 +1418,9 @@ dependencies = [
 
 [[package]]
 name = "ara-play"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
+ "ara-components",
  "ara-doc",
  "ciborium",
  "serde",
@@ -1355,12 +1431,14 @@ dependencies = [
 
 [[package]]
 name = "ara-play-host"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-asset",
  "ara-diag",
  "ara-doc",
+ "ara-gpu",
  "ara-host",
+ "ara-importers",
  "ara-json",
  "ara-ops",
  "ara-play",
@@ -1373,11 +1451,12 @@ dependencies = [
 
 [[package]]
 name = "ara-player"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "anyhow",
  "ara-asset",
  "ara-audio",
+ "ara-crash",
  "ara-doc",
  "ara-gpu",
  "ara-host",
@@ -1387,6 +1466,7 @@ dependencies = [
  "ara-json",
  "ara-mcp",
  "ara-ops",
+ "ara-pack",
  "ara-platform",
  "ara-play",
  "ara-play-host",
@@ -1399,9 +1479,11 @@ dependencies = [
  "ara-runtime-world",
  "ara-schema",
  "ara-sim",
+ "ciborium",
  "clap",
  "embed-resource",
  "glam 0.34.1",
+ "image",
  "serde",
  "serde_json",
  "windows-sys 0.61.2",
@@ -1409,7 +1491,7 @@ dependencies = [
 
 [[package]]
 name = "ara-profile"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-gpu",
  "ara-json",
@@ -1423,7 +1505,7 @@ dependencies = [
 
 [[package]]
 name = "ara-proto"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-diag",
  "serde",
@@ -1431,8 +1513,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "ara-release"
+version = "0.0.1-alpha"
+dependencies = [
+ "anyhow",
+ "ara-export-installer",
+ "ara-json",
+ "ara-update",
+ "blake3",
+ "clap",
+ "getrandom 0.3.4",
+ "hex",
+ "serde_json",
+ "tempfile",
+ "zip 2.6.1",
+]
+
+[[package]]
 name = "ara-render"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "anyhow",
  "ara-gpu",
@@ -1450,11 +1549,14 @@ dependencies = [
 
 [[package]]
 name = "ara-render-fidelity"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "anyhow",
+ "ara-asset-format",
+ "ara-components",
  "ara-gpu",
  "ara-render",
+ "ara-texture-stream",
  "bytemuck",
  "glam 0.30.9",
  "image",
@@ -1465,7 +1567,7 @@ dependencies = [
 
 [[package]]
 name = "ara-render-geo"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "anyhow",
  "ara-asset",
@@ -1490,7 +1592,7 @@ dependencies = [
 
 [[package]]
 name = "ara-render2d"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "anyhow",
  "ara-2d",
@@ -1516,7 +1618,7 @@ dependencies = [
 
 [[package]]
 name = "ara-rpc"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-diag",
  "ara-proto",
@@ -1527,7 +1629,7 @@ dependencies = [
 
 [[package]]
 name = "ara-runtime"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-2d",
  "ara-acoustics",
@@ -1571,7 +1673,7 @@ dependencies = [
 
 [[package]]
 name = "ara-runtime-audio"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-acoustics",
  "ara-audio",
@@ -1592,7 +1694,7 @@ dependencies = [
 
 [[package]]
 name = "ara-runtime-net"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-components",
  "ara-doc",
@@ -1600,6 +1702,7 @@ dependencies = [
  "ara-net",
  "ara-physics",
  "ara-runtime",
+ "ara-runtime-script",
  "ara-schema",
  "ara-sim",
  "bevy_ecs",
@@ -1609,36 +1712,43 @@ dependencies = [
 
 [[package]]
 name = "ara-runtime-render"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "anyhow",
  "ara-2d",
  "ara-asset",
  "ara-asset-format",
+ "ara-components",
  "ara-doc",
+ "ara-foliage",
  "ara-gpu",
  "ara-importers",
  "ara-input",
  "ara-landscape",
  "ara-render",
+ "ara-render-fidelity",
  "ara-render2d",
  "ara-runtime",
  "ara-schema",
  "ara-sim",
  "ara-terrain",
+ "ara-texture-stream",
  "ara-vfx",
  "ara-vfx-gpu",
  "bevy_ecs",
+ "bytemuck",
  "glam 0.30.9",
  "glam 0.34.1",
  "image",
+ "serde",
  "serde_json",
+ "sha2 0.10.9",
  "texture2ddecoder",
 ]
 
 [[package]]
 name = "ara-runtime-script"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-components",
  "ara-diag",
@@ -1654,7 +1764,7 @@ dependencies = [
 
 [[package]]
 name = "ara-runtime-world"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-acoustics",
  "ara-ai",
@@ -1679,8 +1789,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "ara-samples"
+version = "0.0.1-alpha"
+dependencies = [
+ "anyhow",
+ "ara-anim",
+ "ara-asset",
+ "ara-components",
+ "ara-diag",
+ "ara-doc",
+ "ara-foliage",
+ "ara-gpu",
+ "ara-json",
+ "ara-ops",
+ "ara-pathtrace",
+ "ara-play",
+ "ara-play-host",
+ "ara-proto",
+ "ara-render",
+ "ara-render-fidelity",
+ "ara-rpc",
+ "ara-runtime",
+ "ara-runtime-render",
+ "ara-schema",
+ "ara-terrain",
+ "ara-vfx",
+ "ara-vfx-gpu",
+ "blake3",
+ "clap",
+ "glam 0.30.9",
+ "glam 0.34.1",
+ "image",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ara-save"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-diag",
  "ara-doc",
@@ -1697,7 +1843,7 @@ dependencies = [
 
 [[package]]
 name = "ara-schema"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-diag",
  "ara-json",
@@ -1710,7 +1856,7 @@ dependencies = [
 
 [[package]]
 name = "ara-schema-derive"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1719,7 +1865,7 @@ dependencies = [
 
 [[package]]
 name = "ara-script"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-components",
  "ara-diag",
@@ -1740,15 +1886,29 @@ dependencies = [
 
 [[package]]
 name = "ara-sdl3-src"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "cc",
  "sdl3-sys",
 ]
 
 [[package]]
+name = "ara-setup"
+version = "0.0.1-alpha"
+dependencies = [
+ "anyhow",
+ "ara-export-installer",
+ "embed-resource",
+ "image",
+ "serde_json",
+ "tempfile",
+ "windows-sys 0.61.2",
+ "zip 2.6.1",
+]
+
+[[package]]
 name = "ara-shader-cook"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "anyhow",
  "ara-gpu",
@@ -1760,7 +1920,7 @@ dependencies = [
 
 [[package]]
 name = "ara-sim"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-components",
  "ara-diag",
@@ -1783,7 +1943,7 @@ dependencies = [
 
 [[package]]
 name = "ara-terrain"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-cmd",
  "ara-diag",
@@ -1801,21 +1961,23 @@ dependencies = [
 
 [[package]]
 name = "ara-texture-stream"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "anyhow",
  "ara-asset-format",
  "ara-gpu",
  "ara-render",
  "bytemuck",
+ "glam 0.30.9",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "texture2ddecoder",
 ]
 
 [[package]]
 name = "ara-ui"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "accesskit 0.25.1",
  "ara-json",
@@ -1829,7 +1991,7 @@ dependencies = [
 
 [[package]]
 name = "ara-ui-document"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "roxmltree 0.21.1",
  "serde",
@@ -1837,7 +1999,7 @@ dependencies = [
 
 [[package]]
 name = "ara-ui-render"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-json",
  "ara-ui",
@@ -1850,7 +2012,7 @@ dependencies = [
 
 [[package]]
 name = "ara-ui-stories"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-doc",
  "ara-json",
@@ -1862,7 +2024,7 @@ dependencies = [
 
 [[package]]
 name = "ara-ui-test"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "accesskit 0.25.1",
  "ara-doc",
@@ -1879,7 +2041,7 @@ dependencies = [
 
 [[package]]
 name = "ara-ui-text"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "parley 0.12.0",
  "serde",
@@ -1887,8 +2049,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "ara-update"
+version = "0.0.1-alpha"
+dependencies = [
+ "ara-diag",
+ "ara-json",
+ "ara-update",
+ "ed25519-dalek",
+ "getrandom 0.3.4",
+ "hex",
+ "reqwest",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "windows-sys 0.61.2",
+ "zip 2.6.1",
+]
+
+[[package]]
 name = "ara-vfx"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-cmd",
  "ara-diag",
@@ -1907,7 +2089,7 @@ dependencies = [
 
 [[package]]
 name = "ara-vfx-gpu"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "anyhow",
  "ara-gpu",
@@ -1927,7 +2109,7 @@ dependencies = [
 
 [[package]]
 name = "ara-vsm"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -1937,7 +2119,7 @@ dependencies = [
 
 [[package]]
 name = "ara-why"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-diag",
  "ara-material",
@@ -1947,7 +2129,7 @@ dependencies = [
 
 [[package]]
 name = "ara-world"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-asset",
  "ara-components",
@@ -1972,7 +2154,7 @@ dependencies = [
 
 [[package]]
 name = "arabench"
-version = "0.0.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ara-collab",
  "ara-diag",
@@ -4175,6 +4357,12 @@ checksum = "32b13ea120a812beba79e34316b3942a857c86ec1593cb34f27bb28272ce2cca"
 
 [[package]]
 name = "const-oid"
+version = "0.9.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
+
+[[package]]
+name = "const-oid"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
@@ -4569,6 +4757,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
+name = "curve25519-dalek"
+version = "4.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97fb8b7c4503de7d6ae7b42ab72a5a59857b4c937ec27a3d4539dba95b5ab2be"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "curve25519-dalek-derive",
+ "digest 0.10.7",
+ "fiat-crypto",
+ "rustc_version",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "curve25519-dalek-derive"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f46882e17999c6cc590af592290432be3bce0428cb0d5f8b6715e4dc7b383eb3"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "darling"
 version = "0.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4681,11 +4896,21 @@ dependencies = [
 
 [[package]]
 name = "der"
+version = "0.7.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7c1832837b905bbfb5101e07cc24c8deddf52f93225eee6ead5f4d63d53ddcb"
+dependencies = [
+ "const-oid 0.9.6",
+ "zeroize",
+]
+
+[[package]]
+name = "der"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a878c850e9e421b20262e9b41f9c860e4785fa07541c266b62ff9d1ef998a80a"
 dependencies = [
- "const-oid",
+ "const-oid 0.10.2",
  "der_derive",
  "flagset",
  "pem-rfc7468",
@@ -4800,7 +5025,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2"
 dependencies = [
  "block-buffer 0.12.1",
- "const-oid",
+ "const-oid 0.10.2",
  "crypto-common 0.2.2",
 ]
 
@@ -4996,6 +5221,30 @@ dependencies = [
  "dasp_frame",
  "dasp_sample",
  "smallvec",
+]
+
+[[package]]
+name = "ed25519"
+version = "2.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "115531babc129696a58c64a4fef0a8bf9e9698629fb97e9e40767d235cfbcd53"
+dependencies = [
+ "pkcs8",
+ "signature",
+]
+
+[[package]]
+name = "ed25519-dalek"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9"
+dependencies = [
+ "curve25519-dalek",
+ "ed25519",
+ "serde",
+ "sha2 0.10.9",
+ "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -5270,6 +5519,12 @@ name = "ffi-opaque"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec54ac60a7f2ee9a97cad9946f9bf629a3bc6a7ae59e68983dc9318f5a54b81a"
+
+[[package]]
+name = "fiat-crypto"
+version = "0.2.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
 name = "filetime"
@@ -6039,6 +6294,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "http-body"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca2a8f2913ee65f60facd6a5905613afaa448497a0230cc41ce022d93290bc2c"
+dependencies = [
+ "bytes",
+ "http",
+]
+
+[[package]]
+name = "http-body-util"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "23169fe34a5fbcdd3f3862e78fb9b6fccd5f02a6dc6f732547005d45631ce71c"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "http",
+ "http-body",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "httparse"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6051,6 +6329,65 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27f864f10dfb56725ce5ce5472bc52252c8f93a4ab86327122cebf62c5f59a17"
 dependencies = [
  "typenum",
+]
+
+[[package]]
+name = "hyper"
+version = "1.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c3e324da4c95177d6291d4c8730197c0d1822f8a9766814a4a44fa5ab797c9c"
+dependencies = [
+ "atomic-waker",
+ "bytes",
+ "futures-core",
+ "http",
+ "http-body",
+ "httparse",
+ "itoa",
+ "pin-project-lite",
+ "smallvec",
+ "tokio",
+ "want",
+]
+
+[[package]]
+name = "hyper-rustls"
+version = "0.27.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dfa8e654703247911e29c23fbeaa261834bd9bb74efba2f9acddc37bfb127f53"
+dependencies = [
+ "http",
+ "hyper",
+ "hyper-util",
+ "rustls",
+ "tokio",
+ "tokio-rustls",
+ "tower-service",
+ "webpki-roots",
+]
+
+[[package]]
+name = "hyper-util"
+version = "0.1.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ddc03d96684f9226b8a787cdb71488417b53ab5ea8fdb1dac946cb9431cc8bff"
+dependencies = [
+ "base64 0.23.1",
+ "bytes",
+ "futures-channel",
+ "futures-util",
+ "http",
+ "http-body",
+ "httparse",
+ "hyper",
+ "ipnet",
+ "libc",
+ "percent-encoding",
+ "pin-project-lite",
+ "socket2",
+ "tokio",
+ "tower-service",
+ "tracing",
 ]
 
 [[package]]
@@ -6585,6 +6922,12 @@ checksum = "6928282826c822ad91bf1c9a1cb90a30ba1c26770749929b4656cd6be829cd7c"
 dependencies = [
  "rustversion",
 ]
+
+[[package]]
+name = "ipnet"
+version = "2.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "791930b43c0d5973160d90a8f3894509f2b273430f5c5c73b668636d0287c5c0"
 
 [[package]]
 name = "is-terminal"
@@ -7539,8 +7882,6 @@ dependencies = [
 [[package]]
 name = "lightyear_sync"
 version = "0.31.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82eceb35d8eace3b1808e19e27582ed3b669964a335df4abf7723bfe922403e8"
 dependencies = [
  "bevy_app",
  "bevy_derive",
@@ -7593,8 +7934,6 @@ dependencies = [
 [[package]]
 name = "lightyear_transport"
 version = "0.31.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af892d197389fab9d663f81f023b4db0640ca488d5ac2e6cf7b6db36d2edd40d"
 dependencies = [
  "bevy_app",
  "bevy_ecs",
@@ -9296,6 +9635,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pkcs8"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f950b2377845cebe5cf8b5165cb3cc1a5e0fa5cfa3e1f7f55707d8fd82e0a7b7"
+dependencies = [
+ "der 0.7.10",
+ "spki 0.7.3",
+]
+
+[[package]]
 name = "pkg-config"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10099,6 +10448,46 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 
 [[package]]
+name = "reqwest"
+version = "0.12.28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "futures-channel",
+ "futures-core",
+ "futures-util",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "js-sys",
+ "log",
+ "percent-encoding",
+ "pin-project-lite",
+ "quinn",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "sync_wrapper",
+ "tokio",
+ "tokio-rustls",
+ "tower",
+ "tower-http",
+ "tower-service",
+ "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "webpki-roots",
+]
+
+[[package]]
 name = "resvg"
 version = "0.45.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10509,6 +10898,10 @@ name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
+dependencies = [
+ "serde",
+ "serde_core",
+]
 
 [[package]]
 name = "send_wrapper"
@@ -10600,6 +10993,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_urlencoded"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3491c14715ca2294c4d6a88f15e84739788c1d030eed8c110436aafdaa2f3fd"
+dependencies = [
+ "form_urlencoded",
+ "itoa",
+ "ryu",
+ "serde",
+]
+
+[[package]]
 name = "sha1"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10657,6 +11062,15 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+
+[[package]]
+name = "signature"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77549399552de45a898a580c1b41d445bf730df867cc44e6c0233bbc4b8329de"
+dependencies = [
+ "rand_core 0.6.4",
+]
 
 [[package]]
 name = "simba"
@@ -10847,12 +11261,22 @@ dependencies = [
 
 [[package]]
 name = "spki"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
+dependencies = [
+ "base64ct",
+ "der 0.7.10",
+]
+
+[[package]]
+name = "spki"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ef958a98b9d5da290cfc78946e9f3e61e1e62a18db0d92cac0b83cc161491a9"
 dependencies = [
  "base64ct",
- "der",
+ "der 0.8.2",
  "digest 0.11.3",
  "sha2 0.11.1",
 ]
@@ -11217,6 +11641,9 @@ name = "sync_wrapper"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0bf256ce5efdfa370213c1dabab5935a12e49f2c58d15e9eac2870d3b4f27263"
+dependencies = [
+ "futures-core",
+]
 
 [[package]]
 name = "synstructure"
@@ -11617,8 +12044,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3641d5bbb5349a79e1020a242d251efbc546ad8048d133958323ce9c40a9c9c"
 dependencies = [
  "indexmap",
+ "serde_core",
+ "serde_spanned",
  "toml_datetime",
  "toml_parser",
+ "toml_writer",
  "winnow",
 ]
 
@@ -11636,6 +12066,51 @@ name = "toml_writer"
 version = "1.1.3+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06bdbd8cfc056b8d2e2e85f29b56a3bdbecb527cef81eb39e3e7b98af4652770"
+
+[[package]]
+name = "tower"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ebe5ef63511595f1344e2d5cfa636d973292adc0eec1f0ad45fae9f0851ab1d4"
+dependencies = [
+ "futures-core",
+ "futures-util",
+ "pin-project-lite",
+ "sync_wrapper",
+ "tokio",
+ "tower-layer",
+ "tower-service",
+]
+
+[[package]]
+name = "tower-http"
+version = "0.6.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4cfcf7e2740e6fc6d4d688b4ef00650406bb94adf4731e43c096c3a19fe40840"
+dependencies = [
+ "bitflags 2.13.2",
+ "bytes",
+ "futures-util",
+ "http",
+ "http-body",
+ "pin-project-lite",
+ "tower",
+ "tower-layer",
+ "tower-service",
+ "url",
+]
+
+[[package]]
+name = "tower-layer"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "121c2a6cda46980bb0fcd1647ffaf6cd3fc79a013de288782836f6df9c48780e"
+
+[[package]]
+name = "tower-service"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 
 [[package]]
 name = "tracing"
@@ -11761,6 +12236,12 @@ checksum = "e875ab7068a75b74f419da453927e05527c36f0001b3c7aad3ce443640683487"
 dependencies = [
  "crossbeam-utils",
 ]
+
+[[package]]
+name = "try-lock"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tungstenite"
@@ -12043,6 +12524,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "want"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec4cdd0dd910afe868b7ef477227d8d538b46b3075031afee8a9f2acb0a2ed0b"
+dependencies = [
+ "try-lock",
+]
+
+[[package]]
 name = "wasi"
 version = "0.11.1+wasi-snapshot-preview1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12215,6 +12705,15 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "1.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5f280bbb2b287bc8e7de7e3852945a0ff50d1bbcb5ed42b6c7a568c546df171"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]
@@ -12946,9 +13445,9 @@ version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "105ef4642d9cb137ef83d623d0e4bf08b8adf69e9918ca904a174adb6d3d038b"
 dependencies = [
- "const-oid",
- "der",
- "spki",
+ "const-oid 0.10.2",
+ "der 0.8.2",
+ "spki 0.8.1",
  "tls_codec",
 ]
 

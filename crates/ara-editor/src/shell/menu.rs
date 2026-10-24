@@ -13,7 +13,7 @@ pub(crate) enum Source {
     Bar(usize),
     /// A right-click (or ⋯) menu for a target.
     Context(Context, Target),
-    /// Snap increments: `move`, `rotate` or `scale`.
+    /// Snap increments (`move`, `rotate`, `scale`) or Scene view fields of view (`fov`).
     Values(&'static str),
     /// An inspector enum field's options.
     Enum(String, Vec<String>),
@@ -133,7 +133,9 @@ impl Shell {
                 // Recently opened first, then the rest by path.
                 scenes.sort_by_key(|id| {
                     (
-                        self.recent_docs
+                        editor
+                            .state
+                            .recent_scenes
                             .iter()
                             .position(|r| r == id)
                             .unwrap_or(usize::MAX),
@@ -206,6 +208,18 @@ impl Shell {
             Source::Bar(i) => self.expand(editor, MENUS[*i].items, &mut root),
             Source::Context(kind, _) => self.expand(editor, menus::context(*kind), &mut root),
             Source::Enum(..) => {}
+            Source::Values("fov") => {
+                let current = editor.state.camera.fov_y_degrees;
+                for v in [30., 35., 40., 46., 50., 54., 60., 70., 90.] {
+                    root.push(Row::Command {
+                        id: "view.camera.fov.set",
+                        target: Target::Text(format!("{v}")),
+                        label: Some(format!("{v}°")),
+                        path: String::new(),
+                        checked: Some((current - v).abs() < 0.05),
+                    });
+                }
+            }
             Source::Values(kind) => {
                 let (values, unit, current): (&[f32], &str, f32) = match *kind {
                     "move" => (
@@ -432,6 +446,15 @@ impl Shell {
         Ok(())
     }
     /// Whether a point is inside an open popup of the current surface.
+    /// The pointer is over the open bar menu's own title, whose click closes it.
+    pub(crate) fn over_open_title(&self) -> bool {
+        let Some(bar) = self.menu.as_ref().and_then(MenuState::bar) else {
+            return false;
+        };
+        self.ui
+            .hit_test(self.pointer[0], self.pointer[1])
+            .is_some_and(|i| self.ui.nodes[i].element.id == format!("menu-title-{bar}"))
+    }
     pub(crate) fn menu_contains(&self, point: [f32; 2]) -> bool {
         self.ui
             .nodes

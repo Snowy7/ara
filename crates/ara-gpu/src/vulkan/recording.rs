@@ -1,3 +1,4 @@
+use super::image_copy::copy_bytes;
 use super::*;
 use crate::commands::*;
 
@@ -52,7 +53,8 @@ pub(super) fn access(
         ),
         Access::AsInput => (
             S::ACCELERATION_STRUCTURE_BUILD_KHR,
-            A::ACCELERATION_STRUCTURE_READ_KHR,
+            // Builds read vertex/index/instance buffers as shader reads, and BLAS as AS reads.
+            A::SHADER_READ | A::ACCELERATION_STRUCTURE_READ_KHR,
             L::GENERAL,
         ),
         Access::AsRead => (shader, A::ACCELERATION_STRUCTURE_READ_KHR, L::GENERAL),
@@ -65,6 +67,8 @@ impl VulkanDevice {
     /// Submit one list with timeline dependencies. Returns a monotonic signal point.
     /// Bindless reachability is conservative: all published resources are retained.
     pub fn submit(&mut self, list: CommandList, waits: &[TimelinePoint]) -> Result<TimelinePoint> {
+        self.poll_shader_reload();
+        crate::cpu_scope!("GPU.submit");
         for wait in waits {
             if wait.value > self.submitted[wait.queue.index()] {
                 return Err(GpuError::Contract("Wait targets unsubmitted work".into()));
@@ -118,8 +122,11 @@ impl VulkanDevice {
             );
         }
         let mut timestamp = 0;
-        for command in &list.commands {
-            self.encode(cmd, queue, query, &mut timestamp, command)?;
+        {
+            crate::cpu_scope!("GPU.record_commands");
+            for command in &list.commands {
+                self.encode(cmd, queue, query, &mut timestamp, command)?;
+            }
         }
         let point = TimelinePoint {
             queue,
@@ -171,14 +178,17 @@ impl VulkanDevice {
                 self.accelerations.get_mut(*h)?.raw.built = true;
             }
         }
-        for value in self.accelerations.values_mut() {
-            value.last[queue.index()] = point.value;
-        }
-        for value in self.buffers.values_mut() {
-            value.last[queue.index()] = point.value;
-        }
-        for value in self.images.values_mut() {
-            value.last[queue.index()] = point.value;
+        {
+            crate::cpu_scope!("GPU.retain_bindless");
+            for value in self.accelerations.values_mut() {
+                value.last[queue.index()] = point.value;
+            }
+            for value in self.buffers.values_mut() {
+                value.last[queue.index()] = point.value;
+            }
+            for value in self.images.values_mut() {
+                value.last[queue.index()] = point.value;
+            }
         }
         self.pending.push(Pending {
             point,
@@ -190,6 +200,7 @@ impl VulkanDevice {
     }
     /// Wait, read timestamps and release native recording storage for a submission.
     pub fn resolve(&mut self, point: TimelinePoint) -> Result<Vec<PassTiming>> {
+        crate::cpu_scope!("GPU.resolve");
         self.wait(point)?;
         let index = self
             .pending
@@ -258,6 +269,7 @@ impl VulkanDevice {
         Ok(())
     }
     fn validate_commands(&self, list: &CommandList) -> Result<()> {
+        crate::cpu_scope!("GPU.validate_commands");
         let mut rendering = false;
         let mut pass = false;
         let mut pipeline = None;
@@ -453,6 +465,26 @@ impl VulkanDevice {
                         return Err(GpuError::Contract("Invalid buffer copy".into()));
                     }
                 }
+                Command::CopyImage {
+                    source,
+                    destination,
+                } => {
+                    let source = self.images.get(*source)?.raw;
+                    let destination = self.images.get(*destination)?.raw;
+                    if rendering
+                        || source.handle == destination.handle
+                        || source.format != destination.format
+                        || source.width != destination.width
+                        || source.height != destination.height
+                        || source.aspect != vk::ImageAspectFlags::COLOR
+                        || !source.usage.contains(vk::ImageUsageFlags::TRANSFER_SRC)
+                        || !destination
+                            .usage
+                            .contains(vk::ImageUsageFlags::TRANSFER_DST)
+                    {
+                        return Err(GpuError::Contract("Invalid image copy".into()));
+                    }
+                }
                 Command::ReadImage {
                     source,
                     destination,
@@ -487,22 +519,4 @@ impl VulkanDevice {
         }
         Ok(())
     }
-}
-
-fn copy_bytes(image: ImageAllocation) -> Result<u64> {
-    let bytes = match image.format {
-        vk::Format::R32G32B32A32_SFLOAT => 16,
-        vk::Format::R16G16B16A16_SFLOAT => 8,
-        vk::Format::A2B10G10R10_UNORM_PACK32 => 4,
-        vk::Format::R8G8B8A8_UNORM
-        | vk::Format::R8G8B8A8_SRGB
-        | vk::Format::D32_SFLOAT
-        | vk::Format::R32_SFLOAT => 4,
-        _ => {
-            return Err(GpuError::Contract(
-                "Copy requires an uncompressed baseline image format".into(),
-            ));
-        }
-    };
-    Ok(u64::from(image.width) * u64::from(image.height) * bytes)
 }

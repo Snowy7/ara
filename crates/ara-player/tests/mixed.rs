@@ -47,6 +47,8 @@ fn crackle() -> Vec<u8> {
 
 /// Writes the sound and its sidecar (typed `SidecarCommand`, canonical writer).
 fn add_sound(dir: &Path) {
+    let worker = support::import_worker();
+    let versions = ara_asset::ProcessWorker::new(worker).versions().unwrap();
     std::fs::create_dir_all(dir.join("sounds")).unwrap();
     std::fs::write(dir.join("sounds/fire.wav"), crackle()).unwrap();
     let mut schema = ara_schema::SchemaDb::new();
@@ -58,7 +60,7 @@ fn add_sound(dir: &Path) {
     let mut store = ara_ops::Store::new(schema, workspace);
     let edit = SidecarCommand::Initialize(ImportSettings {
         importer: "ara.audio".into(),
-        version: "2".into(),
+        version: versions["ara.audio"].clone(),
         settings: json!({"usage": "shortEffect", "codec": "pcm"}),
         ..Default::default()
     })
@@ -75,7 +77,8 @@ fn add_sound(dir: &Path) {
 fn agent_plays_a_scene_mixing_3d_vfx_and_audio() {
     let dir = demo_copy("mixed");
     add_sound(&dir);
-    let captures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.sn/scenario");
+    let captures =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/runtime-polish/captures");
     let mut agent = Agent::open(&dir, 13, |_| {});
     agent.tool(
         "ara_apply",

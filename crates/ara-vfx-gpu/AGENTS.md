@@ -8,7 +8,13 @@ events. Shader compilers are never runtime dependencies.
 
 - `GpuSystem`: allocate from a matching cooked effect, step fixed ticks, render,
   capture through ara-render's channel/provenance API, return agent stats.
+  `advance` simulates a tick without the backdrop copy, draw or tonemap: live
+  composition advances by elapsed ticks, then renders once per presented frame.
 - `View`: camera/frame inputs; optional scene HDR and depth for world composition.
+  `placement` (world origin + uniform scale) maps the world camera, scene depth and
+  probe lattice into effect space; `intensity` scales particle radiance.
+- Lit soft/smoke sprites shade as thin media (HG phase g=0.35 + probe mean
+  radiance), not Lambert surfaces; spark sheets, meshes and ribbons keep surface light.
 - `GpuSystem::capture_over(gpu, request, scene)`: `capture` composited over a scene
   view (background, depth, lighting) for every replayed frame (play captures).
 - `Lighting`, `ProbeLighting`: sun/ambient and completed fidelity DDGI inputs.
@@ -40,6 +46,8 @@ Set CARGO_BUILD_JOBS=2. `run.ps1 -Mode Check` scopes the renderer's implicit-lay
 workaround and runs crate gates. Capture/timing modes run headlessly.
 Ordinary cargo test includes CPU contract tests; GPU goldens are explicitly
 enabled with ARA_VFX_GPU_TESTS=1. They require this device/driver and SDK layers.
+GPU test captures and measurements go under target/ara-vfx-gpu; tracked evidence
+and goldens stay unchanged unless the explicit golden update flag is set.
 ARA_UPDATE_GOLDENS=1 deliberately updates six still/sequence PNG baseline pairs.
 Inspect captures before accepting them. Gallery frames use lit geometry and the
 fidelity post stack; benchmark sprites intentionally isolate simulation/fill cost.

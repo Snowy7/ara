@@ -7,6 +7,8 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+ara-crash = { path = "../ara-crash" }
+ara-shader-cook = { path = "../ara-shader-cook" }
 ara-hub-service = { path = "../ara-hub-service" }
 ara-ai = { path = "../ara-ai" }
 ara-audio-why = { path = "../ara-audio-why" }
@@ -22,11 +24,12 @@ ara-play-host = { path = "../ara-play-host" }
 ara-proto.workspace = true
 ara-rpc.workspace = true
 ara-schema.workspace = true
-clap.workspace = true
-serde_json.workspace = true
+clap = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["preserve_order", "float_roundtrip"] }
 
 [dev-dependencies]
-insta.workspace = true
+ara-hub = { path = "../ara-hub" }
+insta = { workspace = true }
 
 [lints]
 workspace = true

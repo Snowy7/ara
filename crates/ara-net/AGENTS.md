@@ -13,6 +13,17 @@ link Lightyear, Replicon, App, sockets, histories or network services.
 - `Client<F>` uses native Lightyear input histories, selective owner rollback and
   remote interpolation. Inject device/bot actions or attach an immutable input
   source. Sources run only when sampling new inputs, never during native replay.
+  Rollback history covers the configured prediction horizon; keep those budgets
+  aligned so delayed authoritative samples remain reconcilable.
+- `Server::advance` / `Client::advance` use caller-supplied elapsed time instead of
+  wall-clock polling. Advance all peers and `Link::pump` from the same clock;
+  do not mix these calls with `poll`. The first advance consumes its full duration.
+- `ActionCodec<F::Input>` optionally samples multiple declared actions into one
+  history entry and validates/expands that entry on the authority. Install matching
+  codecs through `Client::action_codec` / `Server::action_codec` before polling;
+  bump the feature version when changing the wire input contract.
+- `Authoritative::component_at` defaults to Session reads; embedded runtimes override
+  it for externally owned C# columns before policy projection.
 - `PolicyRegistry` compiles field IDs/codecs from SchemaDb. Mixed public, owner and
   authority-only fields split before encoding; component visibility is enforced by
   Replicon. Quantization/interpolation are independent of rollback metadata.
@@ -25,6 +36,9 @@ link Lightyear, Replicon, App, sockets, histories or network services.
   bounds, tick window, rate and sequence checks run before Session::submit. No
   document ops, edits or authoritative state messages exist on the client channel.
 - `NetId` includes slot/epoch; Spawn contains prefab version and baseline identity.
+  Its `projected` flag carries scene/streaming lifetime ownership from the
+  authority's projection mapping; clients bind these rows when locally resident.
+  The transport protocol revision rejects peers predating this baseline field.
   `Interest` combines spatial grid, ownership/team predicates. RelevantTo filters
   entire entities; PrivateTo filters only owner fields. Transport budgets use
   Lightyear's packet admission (control/ACK traffic is accounted separately).
@@ -45,6 +59,11 @@ link Lightyear, Replicon, App, sockets, histories or network services.
   applies the prepared baseline/handles after Play assigns the role.
 
 ## Transport seam
+
+Only Lightyear's `lightyear_sync` and `lightyear_transport` 0.31.0 are vendored.
+Root Cargo patches bind their RTT and quota clocks to Bevy `Time<Real>`, like
+transport timers. See `vendor/PATCHES.md` for the exact changes and upgrade steps.
+Keep every other Lightyear crate on crates.io at 0.31.0.
 
 Encrypted UDP/netcode is the default. JoinToken is private launch/auth data, never
 replay/log data. A Steam Networking Sockets adapter belongs inside runtime/: replace
@@ -71,6 +90,12 @@ dedicated authority plus three headless bots; success/failure always reaps child
 Field profiles count generated field-codec payload; Link counts encrypted datagrams.
 Do not compare rendered frames with authoritative same-tick checkpoints or repair
 client state from expected test snapshots.
+The adverse gate uses one virtual 60 Hz frame clock, a bounded virtual deadline,
+and a neutral input tail through tick 600; it checks the applied tail and waits
+until every owner has sampled beyond the final input history before asserting.
+The frame-size regression compares complete tick records and replay hashes.
+The delayed-confirmation gate uses a fixed clock and 250 ms each way, beyond
+Lightyear's default 20-tick history, and checks native reconciliation and replay.
 
 The composition root must call `ara_net::register(host, control)`; this optional
 crate never makes ara-host depend on networking. Workspace members are globbed,

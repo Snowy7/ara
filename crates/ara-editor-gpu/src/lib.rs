@@ -3,12 +3,14 @@
 mod overlay;
 mod pipeline;
 mod resources;
+mod shared;
 mod submit;
 use anyhow::{Result, ensure};
 use ara_gpu::{vk, vulkan::Context as Gpu};
 use ara_ui::paint::Box2;
 use ara_ui_render::gpu::{Batch, Clip, Instance, TextureUpload, UiGpu};
 use resources::{Buffer, Image, Memory};
+pub use shared::PlaySurface;
 use std::collections::BTreeMap;
 
 struct Texture {
@@ -93,6 +95,9 @@ pub struct NativeUi {
     instances: Vec<Instance>,
     masks: Vec<[f32; 4]>,
     draws: Vec<Draw>,
+    /// Time spent waiting for submitted UI work since `take_gpu_wait` (≈ GPU time,
+    /// since every submission waits for its fence).
+    gpu_wait: std::cell::Cell<std::time::Duration>,
     logical: [u32; 2],
     dpi: f32,
     overlays: Vec<Overlay>,
@@ -129,6 +134,7 @@ impl NativeUi {
             instances: Vec::new(),
             masks: Vec::new(),
             draws: Vec::new(),
+            gpu_wait: Default::default(),
             logical: [1, 1],
             dpi: 1.,
             overlays: Vec::new(),

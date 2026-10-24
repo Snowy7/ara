@@ -25,19 +25,47 @@ pub fn copy(from: &Path, to: &Path) {
     }
 }
 
-/// The import worker next to the player binary, built on demand.
-pub fn import_worker(player: &Path) -> PathBuf {
-    let worker =
-        player.with_file_name(format!("ara-import-worker{}", std::env::consts::EXE_SUFFIX));
-    if !worker.exists() {
-        let status = std::process::Command::new(env!("CARGO"))
-            .args(["build", "-p", "ara-import-worker"])
-            .env("CARGO_BUILD_JOBS", "2")
-            .status()
-            .unwrap();
-        assert!(status.success(), "building ara-import-worker failed");
+/// Reuse the gate's current Cargo artifact; standalone tests build the worker.
+pub fn import_worker() -> PathBuf {
+    if let Some(path) = std::env::var_os("CARGO_BIN_EXE_ara-import-worker") {
+        let worker = PathBuf::from(path);
+        assert!(
+            worker.is_file(),
+            "gate import worker is missing: {}",
+            worker.display()
+        );
+        return worker;
     }
-    worker
+    // Always build (a no-op when current): a stale worker from before an importer
+    // version change cooks nothing, and models silently become placeholders.
+    let output = std::process::Command::new(env!("CARGO"))
+        .args([
+            "build",
+            "-p",
+            "ara-import-worker",
+            "--locked",
+            "--message-format=json",
+        ])
+        .env("CARGO_BUILD_JOBS", "2")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "building ara-import-worker failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find_map(|message| {
+            (message["reason"] == "compiler-artifact"
+                && message["target"]["name"] == "ara-import-worker"
+                && message["profile"]["test"] == false)
+                .then(|| message["executable"].as_str().map(PathBuf::from))
+                .flatten()
+        })
+        .expect("Cargo reported the import worker executable")
 }
 
 pub struct Agent {
@@ -97,8 +125,19 @@ impl Agent {
     /// A host on the project at `dir` (engine schemas registered) with the play
     /// service configured by `configure`, and an agent session.
     pub fn open(dir: &Path, seed: u64, configure: impl FnOnce(&mut PlayConfig)) -> Self {
+        Self::open_with(dir, seed, configure, |_| {})
+    }
+
+    /// As [`Agent::open`], with `service` run on the play service before the host
+    /// takes it (the editor takes its embedded-surface handle there).
+    pub fn open_with(
+        dir: &Path,
+        seed: u64,
+        configure: impl FnOnce(&mut PlayConfig),
+        service: impl FnOnce(&mut PlayService),
+    ) -> Self {
         let player = PathBuf::from(env!("CARGO_BIN_EXE_ara-player"));
-        let worker = import_worker(&player);
+        let worker = import_worker();
         let project = ara_play_host::open_project(dir).unwrap();
         assert!(
             project.diags.iter().all(|d| !d.is_error()),
@@ -115,10 +154,14 @@ impl Agent {
         .unwrap();
         let mut config = PlayConfig::for_project(dir);
         config.pool.executable = player;
+        if let Some(player) = std::env::var_os("ARA_BENCH_PLAYER") {
+            config.pool.executable = player.into();
+        }
         config.import_worker = worker;
         configure(&mut config);
-        host.register(Box::new(PlayService::new(dir, config)))
-            .unwrap();
+        let mut play = PlayService::new(dir, config);
+        service(&mut play);
+        host.register(Box::new(play)).unwrap();
         let mut agent = Agent {
             host,
             mcp: Adapter::new(),
@@ -163,4 +206,43 @@ pub fn build_dotnet() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+/// Posts the real native window-close event to this harness's player only.
+#[cfg(windows)]
+pub fn close_window(pid: u32) -> bool {
+    struct Target {
+        pid: u32,
+        posted: bool,
+    }
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn EnumWindows(
+            callback: unsafe extern "system" fn(isize, isize) -> i32,
+            parameter: isize,
+        ) -> i32;
+        fn GetWindowThreadProcessId(window: isize, pid: *mut u32) -> u32;
+        fn IsWindowVisible(window: isize) -> i32;
+        fn PostMessageW(window: isize, message: u32, wparam: usize, lparam: isize) -> i32;
+    }
+    unsafe extern "system" fn visit(window: isize, parameter: isize) -> i32 {
+        // SAFETY: EnumWindows invokes synchronously with our live Target pointer.
+        let target = unsafe { &mut *(parameter as *mut Target) };
+        let mut pid = 0;
+        // SAFETY: the OS supplies a window handle; the output PID pointer is valid.
+        unsafe {
+            GetWindowThreadProcessId(window, &mut pid);
+            if pid == target.pid && IsWindowVisible(window) != 0 {
+                target.posted = PostMessageW(window, 0x0010, 0, 0) != 0;
+                return 0;
+            }
+        }
+        1
+    }
+    let mut target = Target { pid, posted: false };
+    // SAFETY: visit has the Win32 callback ABI and Target outlives this enumeration.
+    unsafe {
+        EnumWindows(visit, std::ptr::from_mut(&mut target) as isize);
+    }
+    target.posted
 }

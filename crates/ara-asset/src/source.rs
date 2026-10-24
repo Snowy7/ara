@@ -1,6 +1,6 @@
 use crate::{
     AssetChanged, CacheBackend, Cancellation, Digest, Error, FileWatcher, HotReload, ImportInput,
-    ProcessWorker, ReloadEvent, Result, Sidecar,
+    ImportSettings, ProcessWorker, ReloadEvent, Result, Sidecar,
 };
 use ara_schema::SchemaDb;
 use serde::{Deserialize, Serialize};
@@ -46,22 +46,26 @@ pub fn snapshot(
     worker: &ProcessWorker,
     cancellation: &Cancellation,
 ) -> Result<ImportInput> {
-    let root = root.canonicalize()?;
+    let root = root
+        .canonicalize()
+        .map_err(|e| io_at(e, &root.display().to_string()))?;
     let source_path = checked_path(&root, &root, &asset.path)?;
-    let source = std::fs::read(&source_path)?;
+    let source = std::fs::read(&source_path).map_err(|e| io_at(e, &asset.path))?;
     let parent = source_path
         .parent()
         .ok_or_else(|| Error::Invalid("source has no parent".into()))?;
     let mut dependencies = BTreeMap::new();
-    for uri in worker.discover(
+    for uri in worker.discover_with_settings(
         &asset.importer,
         &asset.version,
         source.clone(),
+        asset.settings.clone(),
         cancellation,
     )? {
         cancellation.check()?;
         let path = checked_path(&root, parent, &uri)?;
-        dependencies.insert(uri, std::fs::read(path)?);
+        let bytes = std::fs::read(path).map_err(|e| io_at(e, &uri))?;
+        dependencies.insert(uri, bytes);
     }
     cancellation.check()?;
     Ok(ImportInput {
@@ -77,6 +81,13 @@ pub fn snapshot(
         asset_dependencies: asset.asset_dependencies.clone(),
     })
 }
+/// An I/O error that names the file it is about (Problems shows which file).
+fn io_at(error: std::io::Error, path: &str) -> Error {
+    Error::Io(std::io::Error::new(
+        error.kind(),
+        format!("`{path}`: {error}"),
+    ))
+}
 fn checked_path(root: &Path, base: &Path, uri: &str) -> Result<PathBuf> {
     let relative = Path::new(uri);
     if uri.contains(':')
@@ -90,7 +101,10 @@ fn checked_path(root: &Path, base: &Path, uri: &str) -> Result<PathBuf> {
             "dependency URI must be a relative project path".into(),
         ));
     }
-    let path = base.join(relative).canonicalize()?;
+    let path = base
+        .join(relative)
+        .canonicalize()
+        .map_err(|e| io_at(e, uri))?;
     if !path.starts_with(root) {
         return Err(Error::Invalid("dependency escapes project root".into()));
     }
@@ -109,6 +123,7 @@ pub struct AssetPipeline {
     schema: Arc<SchemaDb>,
     watcher: FileWatcher,
     sources: BTreeMap<String, SourceAsset>,
+    configurations: BTreeMap<String, ImportSettings>,
     epochs: BTreeMap<String, u64>,
     snapshots: BTreeMap<String, Cancellation>,
     snapshot_changes: BTreeSet<String>,
@@ -134,6 +149,7 @@ impl AssetPipeline {
             schema,
             watcher,
             sources: BTreeMap::new(),
+            configurations: BTreeMap::new(),
             epochs: BTreeMap::new(),
             snapshots: BTreeMap::new(),
             snapshot_changes: BTreeSet::new(),
@@ -144,6 +160,15 @@ impl AssetPipeline {
     }
     /// Registers source media. It is imported by request or by the next file change.
     pub fn register(&mut self, asset: SourceAsset) -> Result<()> {
+        Self::validate_source(&asset)?;
+        if self.sources.contains_key(&asset.id) {
+            return Err(Error::Invalid("source asset already registered".into()));
+        }
+        self.sources.insert(asset.id.clone(), asset);
+        Ok(())
+    }
+
+    fn validate_source(asset: &SourceAsset) -> Result<()> {
         ara_doc::AssetId::parse(&asset.id).map_err(Error::Invalid)?;
         if asset.path.is_empty()
             || asset.path.contains(':')
@@ -156,11 +181,41 @@ impl AssetPipeline {
                 "source path must be project-relative with / separators".into(),
             ));
         }
-        if self.sources.contains_key(&asset.id) {
-            return Err(Error::Invalid("source asset already registered".into()));
-        }
+        Ok(())
+    }
+
+    /// Uses command-authored in-memory settings for subsequent immutable snapshots,
+    /// without waiting for a debounced sidecar save. Existing generations stay live.
+    pub fn configure(
+        &mut self,
+        asset: SourceAsset,
+        dependencies: Vec<ara_schema::AssetRef>,
+    ) -> Result<()> {
+        Self::validate_source(&asset)?;
+        self.configurations.insert(
+            asset.id.clone(),
+            ImportSettings {
+                preset: asset.preset,
+                importer: asset.importer.clone(),
+                version: asset.version.clone(),
+                settings: asset.settings.clone(),
+                dependencies,
+            },
+        );
         self.sources.insert(asset.id.clone(), asset);
         Ok(())
+    }
+
+    /// Stops requesting an undone/deleted import. Published generations remain cached
+    /// for existing players and redo, but no late job can publish a deleted source.
+    pub fn unregister(&mut self, id: &str) {
+        self.sources.remove(id);
+        self.configurations.remove(id);
+        if let Some(job) = self.snapshots.remove(id) {
+            job.cancel();
+        }
+        self.reload.cancel(id);
+        *self.epochs.entry(id.to_owned()).or_default() += 1;
     }
     /// Schedules an immutable snapshot. Existing slots stay live during the cook.
     pub fn request(&mut self, id: &str) -> Result<()> {
@@ -182,6 +237,7 @@ impl AssetPipeline {
         let root = self.root.clone();
         let worker = self.worker.clone();
         let schema = Arc::clone(&self.schema);
+        let configuration = self.configurations.get(id).cloned();
         let known_assets: BTreeMap<_, _> = self
             .sources
             .iter()
@@ -207,45 +263,48 @@ impl AssetPipeline {
                 {
                     return Err(Error::Invalid("sidecar escapes project root".into()));
                 }
-                match std::fs::read_to_string(&sidecar_path) {
-                    Ok(text) => {
-                        let sidecar =
-                            Sidecar::read(&text, &sidecar_path.to_string_lossy(), &schema)?;
-                        if sidecar.document().id.as_str() != asset.id {
-                            return Err(Error::Invalid(
-                                "sidecar identity changed; reindex the source before importing"
-                                    .into(),
-                            ));
-                        }
-                        let settings = sidecar.settings()?;
-                        asset.importer = settings.importer;
-                        asset.version = settings.version;
-                        asset.settings = settings.settings;
-                        asset.preset = settings.preset;
-                        for reference in settings.dependencies {
-                            let parts = ara_schema::grammar::parse_ref(&reference.0)
-                                .map_err(Error::Invalid)?;
-                            let known = parts.id.and_then(|id| known_assets.get(id));
-                            let path = known
-                                .map(|(path, _)| path.as_str())
-                                .or(parts.path)
-                                .ok_or_else(|| {
-                                    Error::Invalid("sidecar dependency is unresolved".into())
-                                })?;
-                            let digest = match known.and_then(|(_, hash)| *hash) {
-                                Some(hash) => hash,
-                                None => {
-                                    Digest::of(&std::fs::read(checked_path(&root, &root, path)?)?)
-                                }
-                            };
-                            asset.asset_dependencies.insert(path.to_owned(), digest);
-                            if let Some(id) = parts.id {
-                                asset.asset_dependencies.insert(id.to_owned(), digest);
+                let settings = match configuration {
+                    Some(settings) => Some(settings),
+                    None => match std::fs::read_to_string(&sidecar_path) {
+                        Ok(text) => {
+                            let sidecar =
+                                Sidecar::read(&text, &sidecar_path.to_string_lossy(), &schema)?;
+                            if sidecar.document().id.as_str() != asset.id {
+                                return Err(Error::Invalid(
+                                    "sidecar identity changed; reindex the source before importing"
+                                        .into(),
+                                ));
                             }
+                            Some(sidecar.settings()?)
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                        Err(e) => return Err(e.into()),
+                    },
+                };
+                if let Some(settings) = settings {
+                    asset.importer = settings.importer;
+                    asset.version = settings.version;
+                    asset.settings = settings.settings;
+                    asset.preset = settings.preset;
+                    for reference in settings.dependencies {
+                        let parts =
+                            ara_schema::grammar::parse_ref(&reference.0).map_err(Error::Invalid)?;
+                        let known = parts.id.and_then(|id| known_assets.get(id));
+                        let path = known
+                            .map(|(path, _)| path.as_str())
+                            .or(parts.path)
+                            .ok_or_else(|| {
+                                Error::Invalid("sidecar dependency is unresolved".into())
+                            })?;
+                        let digest = match known.and_then(|(_, hash)| *hash) {
+                            Some(hash) => hash,
+                            None => Digest::of(&std::fs::read(checked_path(&root, &root, path)?)?),
+                        };
+                        asset.asset_dependencies.insert(path.to_owned(), digest);
+                        if let Some(id) = parts.id {
+                            asset.asset_dependencies.insert(id.to_owned(), digest);
                         }
                     }
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(e.into()),
                 }
                 snapshot(&root, &asset, &worker, &cancellation)
             })();
@@ -301,7 +360,9 @@ impl AssetPipeline {
             self.snapshot_changes.clear();
         }
         for id in invalidated {
-            self.request(&id)?;
+            if self.sources.contains_key(&id) {
+                self.request(&id)?;
+            }
         }
         events.extend(self.reload.poll());
         Ok(events)
@@ -309,6 +370,11 @@ impl AssetPipeline {
     /// Whether source snapshots or native cooks remain in flight.
     pub fn is_importing(&self) -> bool {
         !self.snapshots.is_empty() || self.reload.is_importing()
+    }
+
+    /// Whether the requested generation of one source is still being prepared.
+    pub fn is_importing_asset(&self, id: &str) -> bool {
+        self.snapshots.contains_key(id) || self.reload.is_importing_asset(id)
     }
     /// Applies a human-permitted boundary, then invalidates consumers of published
     /// cooked inputs. Dependent cooks pick up the new dependency action hashes.
@@ -341,5 +407,22 @@ impl Drop for AssetPipeline {
         for token in self.snapshots.values() {
             token.cancel();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn missing_sources_name_their_path() {
+        let root = std::env::temp_dir();
+        let error = checked_path(&root, &root, "assets/kit/no-such-model.gltf")
+            .expect_err("the file does not exist");
+        assert!(
+            error
+                .to_string()
+                .contains("`assets/kit/no-such-model.gltf`"),
+            "{error}"
+        );
     }
 }

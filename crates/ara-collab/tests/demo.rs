@@ -167,7 +167,14 @@ fn project() -> PathBuf {
 fn spawn(root: &Path) -> (Kill, u16, String) {
     let exe = std::env::current_exe().expect("test binary");
     let mut child = Command::new(exe)
-        .args(["authority_process", "--exact", "--ignored", "--nocapture"])
+        // Keep libtest's serial-mode test-name prefix off the startup protocol.
+        .args([
+            "authority_process",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--quiet",
+        ])
         .env(ROOT_ENV, root)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -553,7 +560,13 @@ fn two_process_demo() {
         .call("collab.sync", json!({ "session": s, "snapshot": true }))
         .expect("snapshot");
     let snap: Snapshot = serde_json::from_value(snap["snapshot"].clone()).expect("snapshot");
-    let truth = snap.docs[0].text.clone();
+    let truth = snap
+        .docs
+        .iter()
+        .find(|doc| doc.path == "levels/yard.scene")
+        .expect("yard scene")
+        .text
+        .clone();
 
     // Convergence.
     assert_eq!(mia_text, truth, "Mia's replica converged");

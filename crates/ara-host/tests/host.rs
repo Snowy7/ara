@@ -3,7 +3,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ara_diag::{Diagnostic, FixAction, codes};
 use ara_host::{Cx, Host, HostConfig, Method, Project, Service};
@@ -68,6 +68,204 @@ fn begin(h: &mut Host, author: &str) -> String {
         json!({ "client": "test", "author": author }),
     );
     r["session"].as_str().expect("handle").to_owned()
+}
+
+#[test]
+fn native_ui_creation_and_source_ops_preserve_xml_across_restart_and_undo() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/authoring-tests")
+        .join(format!("native-ui-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    copy_dir(&fixtures(), &dir);
+    let mut h = open(&dir, 2040);
+    let session = begin(&mut h, "agent:builder");
+    let request = |dry| {
+        json!({"session":session,"why":"Create the HUD","dryRun":dry,"commands":[
+            {"cmd":"doc.create","args":{"path":"ui/hud.ui","id":"ui_hud"}}
+        ]})
+    };
+    let preview = call(&mut h, "cmd.apply", request(true));
+    let applied = call(&mut h, "cmd.apply", request(false));
+    assert_eq!(preview["ops"], applied["ops"]);
+    assert!(!dir.join("ui/hud.ui").exists());
+    call(
+        &mut h,
+        "cmd.apply",
+        json!({"session":session,"doc":"ui/hud.ui","why":"Add the title","commands":[
+            {"cmd":"ui.source.apply","args":{"source":"<?xml version=\"1.0\"?>\n<ui id=\"hud\"><!-- keep --><text id=\"title\" text=\"Hello &amp; welcome\" /></ui>\n"}}
+        ]}),
+    );
+    h.flush();
+    let text = fs::read_to_string(dir.join("ui/hud.ui")).expect("native source");
+    assert!(text.starts_with("<?xml"));
+    assert!(text.contains("<!-- ara:asset ui_hud -->"));
+    assert!(text.contains("<!-- keep -->"));
+    assert!(text.contains("Hello &amp; welcome"));
+    let project = Project::open(&dir).expect("project");
+    let loaded = project.read_document(&text, "ui/hud.ui");
+    assert!(loaded.diags.is_empty(), "{:?}", loaded.diags);
+    assert_eq!(
+        project
+            .write_document(&loaded.doc.expect("UI document"))
+            .expect("writer"),
+        text
+    );
+    h.kill();
+    let mut h = open(&dir, 2041);
+    let session = begin(&mut h, "agent:builder");
+    call(&mut h, "history.undo", json!({"session":session}));
+    h.flush();
+    let text = fs::read_to_string(dir.join("ui/hud.ui")).expect("empty native source");
+    assert!(text.contains("<ui id=\"ui_hud\" />"));
+    call(&mut h, "history.undo", json!({"session":session}));
+    h.flush();
+    assert!(!dir.join("ui/hud.ui").exists());
+}
+
+#[test]
+#[allow(clippy::unwrap_used)]
+fn recovery_replays_only_unsaved_documents_after_a_partial_flush() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/authoring-tests")
+        .join(format!("partial-flush-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    copy_dir(&fixtures(), &dir);
+    let mut h = open(&dir, 2030);
+    let session = begin(&mut h, "agent:builder");
+    let created = call(
+        &mut h,
+        "cmd.apply",
+        json!({"session":session,"why":"Create two levels","commands":[
+            {"cmd":"doc.create","args":{"path":"levels/first.scene","id":"sc_first"}},
+            {"cmd":"doc.create","args":{"path":"levels/second.scene","id":"sc_second"}}
+        ]}),
+    );
+    h.flush();
+    h.kill();
+    // Simulate a crash after the first file's rename and flush journal entry.
+    fs::remove_file(dir.join("levels/second.scene")).unwrap();
+    let journal = dir.join(".ara/journal");
+    let text = fs::read_to_string(&journal).unwrap();
+    let text = text
+        .lines()
+        .filter(|line| {
+            let entry: Value = serde_json::from_str(line).unwrap();
+            !(entry["t"] == "flush" && entry["doc"] == "sc_second")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    fs::write(journal, text).unwrap();
+    let mut h = open(&dir, 2031);
+    let docs = call(&mut h, "session.begin", json!({"client":"recovery"}));
+    let docs = docs["documents"].as_array().unwrap();
+    assert!(docs.iter().any(|d| d["id"] == "sc_first"));
+    assert!(docs.iter().any(|d| d["id"] == "sc_second"));
+    h.flush();
+    assert!(dir.join("levels/second.scene").is_file());
+    let session = begin(&mut h, "agent:builder");
+    call(
+        &mut h,
+        "history.undo",
+        json!({"session":session,"txn":created["txn"]}),
+    );
+    h.flush();
+    assert!(!dir.join("levels/first.scene").exists());
+    assert!(!dir.join("levels/second.scene").exists());
+}
+
+#[test]
+fn document_creation_and_main_scene_survive_crash_and_undo() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/authoring-tests")
+        .join(format!("host-documents-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    copy_dir(&fixtures(), &dir);
+    let mut h = open(&dir, 2026);
+    let session = begin(&mut h, "agent:builder");
+    let request = |dry| json!({"session":session,"why":"Create a second level","dryRun":dry,"commands":[{"cmd":"doc.create","as":"level","args":{"path":"levels/new.scene"}}]});
+    let dry = call(&mut h, "cmd.apply", request(true));
+    assert!(!dir.join("levels/new.scene").exists());
+    let created = call(&mut h, "cmd.apply", request(false));
+    assert_eq!(dry["ops"], created["ops"]);
+    assert_eq!(dry["ids"], created["ids"]);
+    assert!(created["txn"].is_string());
+    call(
+        &mut h,
+        "cmd.apply",
+        json!({"session":session,"why":"Start in the new level","commands":[{"cmd":"project.setMain","args":{"scene":"@levels/new.scene"}}]}),
+    );
+    h.kill();
+    let mut h = open(&dir, 2027);
+    let resumed = begin(&mut h, "agent:builder");
+    assert!(
+        dir.join("levels/new.scene").is_file(),
+        "unflushed document recovered"
+    );
+    let marker: Value =
+        serde_json::from_str(&fs::read_to_string(dir.join("ara.project.json")).expect("marker"))
+            .expect("settings");
+    assert_eq!(marker["main"], "levels/new.scene");
+    call(&mut h, "history.undo", json!({"session":resumed}));
+    call(&mut h, "history.undo", json!({"session":resumed}));
+    h.flush();
+    assert!(
+        !dir.join("levels/new.scene").exists(),
+        "undo removes the empty skeleton"
+    );
+    drop(h);
+    let mut h = open(&dir, 2028);
+    let resumed = begin(&mut h, "agent:builder");
+    assert!(
+        !dir.join("levels/new.scene").exists(),
+        "recovery respects the deletion flush"
+    );
+    // A source file must never be overwritten by a document command.
+    let d = fail(
+        &mut h,
+        "cmd.apply",
+        json!({"session":resumed,"why":"Collision test","commands":[{"cmd":"doc.create","args":{"path":"levels/arena.scene"}}]}),
+    );
+    assert_eq!(d.code, codes::INVALID_PARAMS);
+}
+
+#[test]
+fn explicit_document_deletion_flushes_recovers_and_undoes_with_history() {
+    let dir = project("document-delete");
+    let mut host = open(&dir, 901);
+    let session = begin(&mut host, "agent:builder");
+    call(
+        &mut host,
+        "cmd.apply",
+        json!({"session":session,"doc":"ara.project.json","why":"Create a generated level","commands":[{"cmd":"doc.create","args":{"path":"levels/generated.scene","id":"sc_generated"}}]}),
+    );
+    call(
+        &mut host,
+        "cmd.apply",
+        json!({"session":session,"doc":"levels/generated.scene","why":"Populate the generated level","commands":[
+            {"cmd":"entity.create","args":{"id":"e_root","components":{"Transform":{}}}},
+            {"cmd":"entity.create","args":{"id":"e_child","parent":"e_root","components":{"Transform":{"position":[1,2,3]}}}}
+        ]}),
+    );
+    host.flush();
+    let before = fs::read_to_string(dir.join("levels/generated.scene")).expect("saved scene");
+    call(
+        &mut host,
+        "cmd.apply",
+        json!({"session":session,"doc":"ara.project.json","why":"Regenerate the level through document ops","commands":[{"cmd":"doc.delete","args":{"document":"@#sc_generated"}}]}),
+    );
+    host.flush();
+    assert!(!dir.join("levels/generated.scene").exists());
+    drop(host);
+    let mut host = open(&dir, 902);
+    let session = begin(&mut host, "agent:builder");
+    assert!(!dir.join("levels/generated.scene").exists());
+    call(&mut host, "history.undo", json!({"session":session}));
+    host.flush();
+    assert_eq!(
+        before,
+        fs::read_to_string(dir.join("levels/generated.scene")).expect("restored scene")
+    );
 }
 
 fn scene(dir: &Path) -> String {
@@ -278,17 +476,12 @@ fn review_accepts_and_reverts_per_transaction_and_entity() {
     let txn = r["txn"].as_str().expect("txn").to_owned();
     let marker = r["ids"]["$m"].as_str().expect("marker").to_owned();
     let pending = call(&mut h, "review.list", json!({ "session": human }));
-    assert_eq!(pending["items"][0]["txn"], txn.as_str());
+    assert_eq!(pending["items"], json!([]), "D24 has no pending review");
 
-    let d = fail(
+    call(
         &mut h,
         "review.accept",
         json!({ "session": agent, "txn": txn }),
-    );
-    assert_eq!(
-        d.code,
-        codes::NOT_REVIEWABLE,
-        "agents cannot accept their own changes"
     );
 
     call(
@@ -313,8 +506,8 @@ fn review_accepts_and_reverts_per_transaction_and_entity() {
         .expect("listed")
         .clone();
     assert_eq!(
-        original["status"], "applied",
-        "the marker is still unreviewed"
+        original["status"], "accepted",
+        "the marker remains accepted"
     );
 
     call(
@@ -335,12 +528,11 @@ fn review_accepts_and_reverts_per_transaction_and_entity() {
         accepted["items"][0]["review"]["sc_arena001/e_flr1"],
         "reverted"
     );
-    let d = fail(
+    call(
         &mut h,
         "review.accept",
         json!({ "session": human, "all": true }),
     );
-    assert_eq!(d.code, codes::NOT_REVIEWABLE, "nothing left");
 }
 
 #[test]
@@ -415,7 +607,7 @@ fn the_journal_replays_commits_lost_in_a_crash() {
         "same transaction ID"
     );
     assert_eq!(
-        history["items"][0]["status"], "applied",
+        history["items"][0]["status"], "accepted",
         "review state survives"
     );
     call(&mut h, "history.undo", json!({ "session": s }));
@@ -484,6 +676,72 @@ fn external_edits_merge_in_or_are_reported_without_overwriting() {
     );
     assert_eq!(logs["total"], 1);
     assert_eq!(name_of(&mut h, &s, "e_flr1"), "Agent");
+}
+
+/// Tick until `done`, failing after ten seconds.
+fn tick_until(h: &mut Host, what: &str, mut done: impl FnMut(&mut Host) -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !done(h) {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        h.tick();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// With its own cadence (OS notifications, or polling without them) the file
+/// thread saves and watches off the tick: the host's saves never come back as
+/// external edits, and real edits and new documents still arrive.
+#[test]
+fn the_file_thread_saves_and_watches_off_the_tick() {
+    let dir = project("file-thread");
+    let config = HostConfig {
+        debounce: Duration::from_millis(20),
+        seed: Some(70),
+        ..HostConfig::default()
+    };
+    let mut h = Host::open(Project::open(&dir).expect("project"), config).expect("host");
+    let s = begin(&mut h, "agent:claude");
+    call(
+        &mut h,
+        "cmd.apply",
+        json!({ "session": s, "doc": "levels/arena.scene", "why": "rename the floor",
+                "commands": [{ "cmd": "property.set", "args": { "entity": "e_flr1", "path": "name", "value": "Saved" } }] }),
+    );
+    tick_until(&mut h, "the debounced save", |_| {
+        scene(&dir).contains("\"Saved\"")
+    });
+    // Long enough for the thread to see its own write.
+    for _ in 0..30 {
+        h.tick();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let merged = |h: &mut Host| {
+        call(h, "logs", json!({ "session": s, "codes": ["ARA1907"] }))["total"].clone()
+    };
+    assert_eq!(
+        merged(&mut h),
+        0,
+        "the host's own save came back as an edit"
+    );
+
+    fs::write(
+        dir.join("levels/arena.scene"),
+        scene(&dir).replace("\"Saved\"", "\"Edited\""),
+    )
+    .expect("edit");
+    tick_until(&mut h, "the external edit", |h| {
+        name_of(h, &s, "e_flr1") == "Edited"
+    });
+    assert_eq!(merged(&mut h), 1);
+
+    fs::write(
+        dir.join("levels/extra.scene"),
+        r#"{"$schema":"ara://schema/scene/1","id":"sc_extra001","records":{}}"#,
+    )
+    .expect("new document");
+    tick_until(&mut h, "the new document", |h| {
+        h.store().workspace().find("levels/extra.scene").is_some()
+    });
 }
 
 #[test]
@@ -711,8 +969,8 @@ fn calls_find_their_document_and_report_created_ids_plainly() {
     let begun = call(&mut h, "session.begin", json!({ "client": "codex" }));
     assert_eq!(
         begun["documents"].as_array().map(Vec::len),
-        Some(3),
-        "scene and two prefabs"
+        Some(4),
+        "scene, two prefabs and project settings"
     );
 
     // No `doc`: the entity named by its selector picks the scene; `as` may repeat `id`.
